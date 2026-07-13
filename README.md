@@ -13,6 +13,14 @@ ChatGPT Developer Mode
 
 Local Dev reuses the MCP registry shared by the ChatGPT desktop app, Codex CLI, and Codex IDE extension. Its own config stores only project roots, selected server IDs, aliases, and project hooks.
 
+The target setup experience is:
+
+```text
+local-dev setup
+```
+
+Setup auto-detects existing MCP servers and project roots, installs only missing dependencies, configures the secure tunnel and auto-start services, opens the required ChatGPT pages, and finishes with a smoke test. Users should never need to edit TOML/JSON or manage services manually.
+
 The design avoids GPT Actions, OpenAPI generation, public ingress, custom OAuth, OpenAI model API calls, a Codex runtime dependency, and model-driven polling.
 
 The first milestone is a compatibility gate proving direct MCP results, chaining, long-running calls, confirmations, reconnect behavior, and tool refresh through a private plugin.
