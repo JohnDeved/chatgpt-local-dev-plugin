@@ -121,6 +121,10 @@ test("production stdio server exposes exactly five core tools", async () => {
       assert.equal(tool.annotations.openWorldHint, false);
       assert.ok(tool.outputSchema);
     }
+    await client.request("tools/call", { name: "project.current", arguments: {} });
+    const dashboardUrl = (await readFile(join(home, ".local-dev", "dashboard.url"), "utf8")).trim();
+    const dashboardCalls = await fetch(new URL("api/calls", dashboardUrl)).then((response) => response.json());
+    assert.equal(dashboardCalls[0].tool, "project.current");
     assert.equal(client.stderr, "");
   } finally {
     client.close();
