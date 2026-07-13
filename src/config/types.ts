@@ -39,9 +39,16 @@ export interface HttpMcpServer extends McpServerCommon {
 
 export type McpServer = StdioMcpServer | HttpMcpServer;
 
+export interface InlineMediaConfig {
+  roots: string[];
+  maxBytes: number;
+  tools?: string[];
+}
+
 export interface SelectedServer {
   id: string;
   alias: string;
+  inlineMedia?: InlineMediaConfig;
 }
 
 export interface ProjectOpenHook {
@@ -59,6 +66,7 @@ export interface LocalDevConfig {
 export interface ResolvedSelectedServer {
   alias: string;
   server: McpServer;
+  inlineMedia?: InlineMediaConfig;
 }
 
 export interface LoadedConfiguration {

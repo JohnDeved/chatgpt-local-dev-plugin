@@ -5,6 +5,8 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CallToolResultSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
 
 import type { HttpMcpServer, ResolvedSelectedServer, StdioMcpServer } from "./config/types.js";
+import { inlineLocalMedia } from "./media.js";
+import { attachMediaViewer } from "./media-viewer.js";
 import { failure } from "./result.js";
 import type { RegistryEntry } from "./registry.js";
 
@@ -63,7 +65,7 @@ async function discover(client: Client, timeout: number): Promise<Tool[]> {
 }
 
 async function connectSelected(selection: ResolvedSelectedServer): Promise<Connection> {
-  const { alias, server } = selection;
+  const { alias, inlineMedia, server } = selection;
   const client = new Client({ name: `local-dev-${alias}`, version: "0.3.0" });
   const transport = server.transport === "stdio" ? stdioTransport(server) : httpTransport(server);
   let tools: Tool[];
@@ -76,11 +78,19 @@ async function connectSelected(selection: ResolvedSelectedServer): Promise<Conne
   }
   const entries = tools.map((tool): RegistryEntry => {
     const exposedName = `${alias}.${tool.name}`;
+    const mediaConfiguration = inlineMedia !== undefined && (inlineMedia.tools === undefined || inlineMedia.tools.includes(tool.name))
+      ? inlineMedia
+      : undefined;
     return {
-      tool: { ...tool, name: exposedName },
+      tool: { ...(mediaConfiguration === undefined ? tool : attachMediaViewer(tool)), name: exposedName },
       call: async (arguments_) => {
         try {
-          return await client.callTool({ name: tool.name, arguments: arguments_ }, CallToolResultSchema, { timeout: server.toolTimeoutMs }) as CallToolResult;
+          const result = await client.callTool(
+            { name: tool.name, arguments: arguments_ },
+            CallToolResultSchema,
+            { timeout: server.toolTimeoutMs },
+          ) as CallToolResult;
+          return await inlineLocalMedia(result, mediaConfiguration);
         } catch {
           return failure(exposedName, "DOWNSTREAM_UNAVAILABLE", `Selected MCP server ${alias} is unavailable.`) as unknown as CallToolResult;
         }

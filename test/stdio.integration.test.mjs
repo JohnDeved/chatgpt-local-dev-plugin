@@ -102,6 +102,12 @@ test("production stdio server exposes exactly five core tools", async () => {
   try {
     const initialized = await initialize(client);
     assert.deepEqual(initialized.result.serverInfo, { name: "local-dev", version: "0.3.0" });
+    assert.deepEqual(initialized.result.capabilities.resources, {});
+    const resources = await client.request("resources/list", {});
+    assert.equal(resources.result.resources[0].uri, "ui://widget/local-dev-media-v1.html");
+    const viewer = await client.request("resources/read", { uri: "ui://widget/local-dev-media-v1.html" });
+    assert.equal(viewer.result.contents[0].mimeType, "text/html;profile=mcp-app");
+    assert.match(viewer.result.contents[0].text, /ui\/notifications\/tool-result/u);
     const listed = await client.request("tools/list", {});
     assert.deepEqual(listed.result.tools.map(({ name }) => name), [
       "project.open",
