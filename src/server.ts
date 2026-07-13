@@ -11,18 +11,24 @@ import {
 
 import { loadConfiguration } from "./config/index.js";
 import { coreTools, CoreRuntime } from "./core/index.js";
+import { startDashboard, type DashboardRuntime } from "./dashboard.js";
 import { ProxyManager } from "./proxy.js";
 import { failure } from "./result.js";
 import { ToolRegistry } from "./registry.js";
 import { MEDIA_VIEWER_HTML, MEDIA_VIEWER_MIME_TYPE, MEDIA_VIEWER_URI } from "./media-viewer.js";
+import { CallJournal } from "./observability.js";
+import { setupPaths } from "./setup/paths.js";
 
 export async function runServer(): Promise<void> {
   const configuration = await loadConfiguration();
   const runtime = new CoreRuntime(configuration.localDev.projectRoots, configuration.localDev.projectOpenHooks);
   const proxy = new ProxyManager();
   const registry = new ToolRegistry();
+  const journal = new CallJournal();
   registry.addAll(coreTools(runtime));
   registry.addAll(await proxy.connect(configuration.selectedServers));
+  let dashboard: DashboardRuntime | undefined;
+  if (process.env.LOCAL_DEV_DASHBOARD !== "0") dashboard = await startDashboard(journal, setupPaths().dashboardUrl);
   const server = new Server(
     { name: "local-dev", version: "0.3.0" },
     {
@@ -55,9 +61,21 @@ export async function runServer(): Promise<void> {
     };
   });
   server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
+    const tracked = journal.begin(params.name, params.arguments ?? {});
     const entry = registry.get(params.name);
-    if (entry === undefined) return failure(params.name, "UNKNOWN_TOOL", "The requested tool is not registered.") as never;
-    return entry.call(params.arguments ?? {});
+    if (entry === undefined) {
+      const result = failure(params.name, "UNKNOWN_TOOL", "The requested tool is not registered.") as never;
+      journal.complete(tracked, result);
+      return result;
+    }
+    try {
+      const result = await entry.call(params.arguments ?? {});
+      journal.complete(tracked, result);
+      return result;
+    } catch (error) {
+      journal.fail(tracked);
+      throw error;
+    }
   });
   const transport = new StdioServerTransport();
 
@@ -67,6 +85,7 @@ export async function runServer(): Promise<void> {
     closing = true;
     await runtime.close();
     await proxy.close();
+    await dashboard?.close();
     await server.close();
   };
   process.on("SIGINT", () => void close());

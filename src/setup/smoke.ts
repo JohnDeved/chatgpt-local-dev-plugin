@@ -7,7 +7,7 @@ export async function smokeServer(home: string, nodePath: string, cliPath: strin
   const transport = new StdioClientTransport({
     command: nodePath,
     args: [cliPath],
-    env: { ...getDefaultEnvironment(), HOME: home },
+    env: { ...getDefaultEnvironment(), HOME: home, LOCAL_DEV_DASHBOARD: "0" },
     stderr: "pipe",
   });
   transport.stderr?.on("data", () => undefined);

@@ -15,6 +15,7 @@ export interface SetupPaths {
   home: string;
   codexConfig: string;
   localConfig: string;
+  dashboardUrl: string;
   state: string;
   launchAgent: string;
   logDirectory: string;

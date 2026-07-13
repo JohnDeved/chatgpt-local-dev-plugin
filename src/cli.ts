@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
 import { createInterface } from "node:readline/promises";
+import { readFile } from "node:fs/promises";
 
 import { runServer } from "./server.js";
-import { readSetupStatus, runSetup, uninstall, type SetupOptions } from "./setup/index.js";
+import { readSetupStatus, runSetup, setupPaths, uninstall, type SetupOptions } from "./setup/index.js";
+import { openUrl } from "./setup/platform.js";
 
 function help(): void {
   process.stdout.write(`Local Dev
@@ -11,6 +13,7 @@ function help(): void {
 Usage:
   local-dev setup [advanced options]
   local-dev status [--json]
+  local-dev dashboard [--json]
   local-dev uninstall [--yes]
 
 The no-argument form starts the stdio MCP server for tunnel-client.
@@ -77,9 +80,27 @@ function message(error: unknown): string {
     UNSUPPORTED_PLATFORM: "This release supports macOS only; no service changes were applied.",
     PROJECT_ROOT_NOT_FOUND: "A selected project root does not exist.",
     PROJECT_ROOT_NOT_ABSOLUTE: "Project roots must be absolute paths.",
+    DASHBOARD_UNAVAILABLE: "The dashboard is unavailable. Confirm the tunnel runtime is running, then retry.",
   };
   if (code.startsWith("UNKNOWN_OPTION:") || code.startsWith("MISSING_VALUE:")) return `Invalid command: ${code.replace(":", " ")}`;
   return messages[code] ?? "Local Dev could not complete the operation. No credential values or raw stack traces were printed.";
+}
+
+async function dashboardUrl(): Promise<string> {
+  const source = await readFile(setupPaths().dashboardUrl, "utf8").catch(() => { throw new Error("DASHBOARD_UNAVAILABLE"); });
+  let url: URL;
+  try {
+    url = new URL(source.trim());
+  } catch {
+    throw new Error("DASHBOARD_UNAVAILABLE");
+  }
+  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !/^\/[a-f0-9]{48}\/$/u.test(url.pathname)) {
+    throw new Error("DASHBOARD_UNAVAILABLE");
+  }
+  const response = await fetch(new URL("api/calls", url), { signal: AbortSignal.timeout(2_000) })
+    .catch(() => { throw new Error("DASHBOARD_UNAVAILABLE"); });
+  if (!response.ok) throw new Error("DASHBOARD_UNAVAILABLE");
+  return url.toString();
 }
 
 async function main(): Promise<void> {
@@ -123,6 +144,16 @@ async function main(): Promise<void> {
       if (status.ready) process.stdout.write("Local Dev is ready\n");
     }
     if (!status.ready) process.exitCode = 1;
+    return;
+  }
+  if (command === "dashboard") {
+    if (args.some((argument) => argument !== "--json")) throw new Error("UNKNOWN_OPTION");
+    const url = await dashboardUrl();
+    if (args.includes("--json")) process.stdout.write(`${JSON.stringify({ url })}\n`);
+    else {
+      await openUrl(url);
+      process.stdout.write("Local Dev dashboard opened in your browser.\n");
+    }
     return;
   }
   if (command === "uninstall") {

@@ -36,6 +36,16 @@ The production server exposes exactly five native tools:
 
 It reads the shared Codex MCP registry from `~/.codex/config.toml` without modifying it. Local-only project roots, selected downstream server aliases, optional allowlisted local-media inlining, and argv-based project hooks live in `~/.local-dev/config.json`; see [`docs/configuration.md`](./docs/configuration.md). Selected stdio and Streamable HTTP servers are discovered with pagination, filtered using the Codex settings, namespaced as `<alias>.<tool>`, and forwarded generically.
 
+## Call dashboard
+
+While the tunnel runtime is running, open the private local dashboard with:
+
+```sh
+local-dev dashboard
+```
+
+The dashboard shows native and proxied MCP calls live, including the exact tool name, server alias, redacted arguments, status, duration, bounded result data, and image/audio metadata. It listens only on an ephemeral `127.0.0.1` port behind a random per-runtime URL token; the URL is stored locally with user-only permissions. Calls are held in a 200-entry in-memory ring and are never persisted to a database. Credential-like fields and base64 media bytes are redacted. See [`docs/dashboard.md`](./docs/dashboard.md).
+
 ## Set up
 
 ```sh

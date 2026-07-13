@@ -40,7 +40,6 @@ for (const path of await collect(root)) {
   if (relative(root, path).startsWith("src/")) {
     const prohibitedModules = [
       "node:dgram",
-      "node:http",
       "node:https",
       "node:net",
       "node:tls",
@@ -50,6 +49,18 @@ for (const path of await collect(root)) {
       if (source.includes(`\"${moduleName}\"`) || source.includes(`'${moduleName}'`)) {
         report(path, "no-prohibited-runtime", `import of ${moduleName}`);
       }
+    }
+    if (
+      source.includes('"node:http"') &&
+      relative(root, path) !== "src/dashboard.ts"
+    ) {
+      report(path, "http-boundary", "node:http is restricted to the loopback dashboard");
+    }
+    if (
+      relative(root, path) === "src/dashboard.ts" &&
+      (!source.includes('server.listen(0, "127.0.0.1"') || !source.includes("randomBytes(24)"))
+    ) {
+      report(path, "loopback-dashboard", "dashboard must bind an ephemeral loopback port behind a random URL token");
     }
     if (
       source.includes('"node:child_process"') &&
