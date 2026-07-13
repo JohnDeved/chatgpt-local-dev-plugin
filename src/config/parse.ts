@@ -4,6 +4,7 @@ import { ConfigError } from "./error.js";
 import type {
   ApprovalMode,
   HttpMcpServer,
+  InlineMediaConfig,
   LocalDevConfig,
   McpServer,
   McpServerCommon,
@@ -19,6 +20,8 @@ type UnknownRecord = Record<string, unknown>;
 const SERVER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const ALIAS = /^[a-z][a-z0-9_-]{0,63}$/u;
 const APPROVAL_MODES = new Set<ApprovalMode>(["auto", "prompt", "writes", "approve"]);
+const DEFAULT_INLINE_MEDIA_MAX_BYTES = 5 * 1024 * 1024;
+const MAX_INLINE_MEDIA_BYTES = 25 * 1024 * 1024;
 
 function record(value: unknown, path: string, code = "INVALID_CODEX_CONFIG"): UnknownRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -230,6 +233,38 @@ function localString(value: unknown, path: string): string {
   return value;
 }
 
+function parseInlineMedia(value: unknown, path: string): InlineMediaConfig | undefined {
+  if (value === undefined) return undefined;
+  const input = localRecord(value, path);
+  requireKeys(input, ["roots", "maxBytes", "tools"], path);
+  if (!Array.isArray(input.roots) || input.roots.length === 0) {
+    throw new ConfigError("INVALID_LOCAL_CONFIG", `${path}.roots`, `${path}.roots must be a non-empty array.`);
+  }
+  const roots = input.roots.map((value, index) => {
+    const root = localString(value, `${path}.roots[${index}]`);
+    if (!isAbsolute(root)) {
+      throw new ConfigError("INVALID_LOCAL_CONFIG", `${path}.roots[${index}]`, "Inline media roots must be absolute.");
+    }
+    return root;
+  });
+  if (new Set(roots).size !== roots.length) {
+    throw new ConfigError("INVALID_LOCAL_CONFIG", `${path}.roots`, "Inline media roots must be unique.");
+  }
+  const maxBytes = input.maxBytes ?? DEFAULT_INLINE_MEDIA_MAX_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || (maxBytes as number) <= 0 || (maxBytes as number) > MAX_INLINE_MEDIA_BYTES) {
+    throw new ConfigError(
+      "INVALID_LOCAL_CONFIG",
+      `${path}.maxBytes`,
+      `${path}.maxBytes must be a positive integer no greater than ${MAX_INLINE_MEDIA_BYTES}.`,
+    );
+  }
+  const tools = input.tools === undefined ? undefined : stringArray(input.tools, `${path}.tools`);
+  if (tools !== undefined && (tools.length === 0 || new Set(tools).size !== tools.length)) {
+    throw new ConfigError("INVALID_LOCAL_CONFIG", `${path}.tools`, `${path}.tools must contain unique tool names.`);
+  }
+  return { roots, maxBytes: maxBytes as number, ...(tools === undefined ? {} : { tools }) };
+}
+
 function inside(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
   return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
@@ -269,13 +304,14 @@ export function parseLocalDevConfig(source: string, sourcePath = "config.json"):
   }
   const selectedServers: SelectedServer[] = input.selectedServers.map((value, index) => {
     const entry = localRecord(value, `localDev.selectedServers[${index}]`);
-    requireKeys(entry, ["id", "alias"], `localDev.selectedServers[${index}]`);
+    requireKeys(entry, ["id", "alias", "inlineMedia"], `localDev.selectedServers[${index}]`);
     const id = localString(entry.id, `localDev.selectedServers[${index}].id`);
     const alias = localString(entry.alias, `localDev.selectedServers[${index}].alias`);
     if (!SERVER_ID.test(id) || !ALIAS.test(alias)) {
       throw new ConfigError("INVALID_LOCAL_CONFIG", `localDev.selectedServers[${index}]`, "Selected server id or alias is invalid.");
     }
-    return { id, alias };
+    const inlineMedia = parseInlineMedia(entry.inlineMedia, `localDev.selectedServers[${index}].inlineMedia`);
+    return { id, alias, ...(inlineMedia === undefined ? {} : { inlineMedia }) };
   });
   if (new Set(selectedServers.map(({ id }) => id)).size !== selectedServers.length || new Set(selectedServers.map(({ alias }) => alias)).size !== selectedServers.length) {
     throw new ConfigError("INVALID_LOCAL_CONFIG", "localDev.selectedServers", "Selected server ids and aliases must be unique.");

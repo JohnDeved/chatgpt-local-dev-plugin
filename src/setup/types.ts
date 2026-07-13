@@ -1,4 +1,4 @@
-import type { LocalDevConfig } from "../config/types.js";
+import type { LocalDevConfig, SelectedServer } from "../config/types.js";
 
 export interface SetupState {
   version: 1;
@@ -23,7 +23,7 @@ export interface SetupPaths {
 export interface SetupOptions {
   yes?: boolean;
   projectRoots?: string[];
-  selectedServers?: Array<{ id: string; alias: string }>;
+  selectedServers?: SelectedServer[];
   alias?: string;
   tunnelId?: string;
   runtimeKeyRef?: string;

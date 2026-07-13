@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { parseCodexConfig, parseLocalDevConfig } from "../config/parse.js";
-import type { LocalDevConfig, McpServer } from "../config/types.js";
+import type { LocalDevConfig, McpServer, SelectedServer } from "../config/types.js";
 import { runCommand, runJson } from "./command.js";
 import { exists, readOptional, removeDirectory, restoreAtomic, writeAtomic } from "./files.js";
 import { installTunnelClient } from "./install.js";
@@ -108,9 +108,9 @@ async function selectBinary(home: string, options: SetupOptions, previous: Setup
   return await installTunnelClient(home);
 }
 
-function recommendedServers(servers: McpServer[]): Array<{ id: string; alias: string }> {
+function recommendedServers(servers: McpServer[]): SelectedServer[] {
   const used = new Set<string>();
-  const selections: Array<{ id: string; alias: string }> = [];
+  const selections: SelectedServer[] = [];
   for (const server of servers) {
     if (server.enabledTools === undefined || server.enabledTools.length === 0) continue;
     if (server.transport === "http" && !server.independentlyUsable) continue;

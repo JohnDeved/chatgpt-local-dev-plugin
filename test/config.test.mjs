@@ -75,10 +75,18 @@ test("parses strict Local Dev selections, roots, and argv hooks", () => {
   const config = parseLocalDevConfig(JSON.stringify({
     version: 1,
     projectRoots: ["/work"],
-    selectedServers: [{ id: "local", alias: "code" }],
+    selectedServers: [{
+      id: "local",
+      alias: "code",
+      inlineMedia: { roots: ["/tmp"], maxBytes: 1024, tools: ["screenshot"] },
+    }],
     projectOpenHooks: [{ projectRoot: "/work/project", argv: ["npm", "install"] }],
   }));
-  assert.deepEqual(config.selectedServers, [{ id: "local", alias: "code" }]);
+  assert.deepEqual(config.selectedServers, [{
+    id: "local",
+    alias: "code",
+    inlineMedia: { roots: ["/tmp"], maxBytes: 1024, tools: ["screenshot"] },
+  }]);
   assert.deepEqual(config.projectOpenHooks[0].argv, ["npm", "install"]);
 });
 
@@ -86,6 +94,9 @@ test("rejects relative roots, duplicate aliases, unknown fields, and shell strin
   const base = { version: 1, projectRoots: ["/work"], selectedServers: [], projectOpenHooks: [] };
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, projectRoots: ["relative"] })), ConfigError);
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, selectedServers: [{ id: "a", alias: "same" }, { id: "b", alias: "same" }] })), ConfigError);
+  assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, selectedServers: [{ id: "a", alias: "a", inlineMedia: { roots: ["relative"] } }] })), ConfigError);
+  assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, selectedServers: [{ id: "a", alias: "a", inlineMedia: { roots: ["/tmp"], maxBytes: 30 * 1024 * 1024 } }] })), ConfigError);
+  assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, selectedServers: [{ id: "a", alias: "a", inlineMedia: { roots: ["/tmp"], tools: [] } }] })), ConfigError);
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, surprise: true })), ConfigError);
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, projectOpenHooks: [{ projectRoot: "/work", argv: "npm install" }] })), ConfigError);
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, projectOpenHooks: [{ projectRoot: "/outside", argv: ["npm", "install"] }] })), ConfigError);

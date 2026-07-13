@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { ConfigError } from "./error.js";
 import { defaultLocalDevConfig, parseCodexConfig, parseLocalDevConfig } from "./parse.js";
-import type { LoadedConfiguration, McpServer, ResolvedSelectedServer } from "./types.js";
+import type { LoadedConfiguration, McpServer, ResolvedSelectedServer, SelectedServer } from "./types.js";
 
 export interface LoadConfigurationOptions {
   home?: string;
@@ -37,7 +37,7 @@ async function readOptional(path: string): Promise<string | undefined> {
 }
 
 function resolveSelections(
-  selected: Array<{ id: string; alias: string }>,
+  selected: SelectedServer[],
   servers: McpServer[],
   disabledIds: string[],
 ): { selectedServers: ResolvedSelectedServer[]; skippedServers: LoadedConfiguration["skippedServers"] } {
@@ -59,7 +59,11 @@ function resolveSelections(
       skippedServers.push({ id: selection.id, code: "MANAGED_AUTH" });
       continue;
     }
-    selectedServers.push({ alias: selection.alias, server });
+    selectedServers.push({
+      alias: selection.alias,
+      server,
+      ...(selection.inlineMedia === undefined ? {} : { inlineMedia: selection.inlineMedia }),
+    });
   }
   return { selectedServers, skippedServers };
 }
