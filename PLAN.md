@@ -107,6 +107,19 @@ Keep the user-facing command surface small:
 - Bound output, retained logs, and execution time.
 - Keep the plugin private.
 
+## Agent execution contract
+
+- Verify current OpenAI tunnel, Developer Mode, Codex config, and MCP SDK behavior from official docs before coding; record any changed assumptions in the plan.
+- Treat the compatibility gate as a hard human checkpoint. Provide exact test prompts and record observed limits in `docs/compatibility.md`; do not continue or add polling/public-ingress fallbacks if it fails.
+- Use TypeScript ESM, a pinned Node runtime range, exact dependency versions, and a committed lockfile.
+- Return stable `structuredContent` for every native tool, with concise text fallback and machine-readable error codes; never expose raw stack traces.
+- Runtime access to `~/.codex/config.toml` is read-only. Setup changes require a preview, confirmation, timestamped backup, atomic write, preservation of unknown fields, and rollback on failure.
+- Prefer the Codex CLI for MCP config changes when available; otherwise use a TOML-preserving edit rather than rewriting the file.
+- CI must use temporary homes and fake stdio/HTTP MCP servers. It must not require real credentials, network tunnels, browsers, services, or user configuration.
+- Keep platform-specific installation and service logic behind small adapters. Never claim an OS is supported until install, repair, uninstall, reboot, and smoke tests pass there.
+- Each phase ends with implementation, tests, concise docs, and one repository-wide check command. Do not begin the next phase while required checks fail.
+- When the plan is ambiguous, choose the smallest implementation consistent with the architecture and document the decision rather than adding abstraction.
+
 ## Implementation phases
 
 1. **Compatibility gate** — prove native MCP behavior through Secure MCP Tunnel.
