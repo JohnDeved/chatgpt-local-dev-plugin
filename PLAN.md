@@ -27,6 +27,10 @@ Verify exact inputs/outputs, four- and seven-call chains, 30/60/120-second calls
 
 Proceed only when results return without model polling and chaining/reconnect behavior is reliable. Remove the benchmark tools afterward.
 
+### Phase 1 implementation note (2026-07-13)
+
+Current OpenAI tunnel documentation still accepts a local stdio command. The current official TypeScript SDK repository recommends split server/client packages, while the OpenAI Apps SDK example still shows the legacy combined package. To keep this temporary compatibility gate focused on transport behavior rather than package-version ambiguity, Phase 1 implements only the bounded MCP stdio subset it needs with Node built-ins and zero runtime dependencies. Revisit the production SDK choice only after the human checkpoint; this note does not authorize Phase 2 work.
+
 ## Shared MCP configuration
 
 Use `~/.codex/config.toml` as the canonical MCP registry shared with the ChatGPT desktop app, Codex CLI, and Codex IDE extension.

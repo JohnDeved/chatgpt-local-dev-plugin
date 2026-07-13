@@ -1,30 +1,66 @@
 # Local Dev Plugin
 
-A planned private ChatGPT Developer Mode plugin that works directly on local projects through native MCP tools and OpenAI Secure MCP Tunnel.
+Phase 1 is a temporary compatibility gate for this private architecture:
 
 ```text
 ChatGPT Developer Mode
-  → OpenAI Secure MCP Tunnel
-  → tunnel-client
-  → Local Dev stdio MCP server
-      → native project/command tools
-      → selected MCP servers from ~/.codex/config.toml
+  -> OpenAI Secure MCP Tunnel
+  -> tunnel-client
+  -> Local Dev stdio MCP compatibility server
 ```
 
-Local Dev reuses the MCP registry shared by the ChatGPT desktop app, Codex CLI, and Codex IDE extension. Its own config stores only project roots, selected server IDs, aliases, and project hooks.
+This milestone does **not** implement the production Local Dev tools, shared Codex configuration, downstream proxy, setup automation, or services. Continue only after the human checkpoint in [`docs/compatibility.md`](./docs/compatibility.md) passes.
 
-The target setup experience is:
+## Local benchmark
 
-```text
-local-dev setup
+The current package targets macOS with Node `22.16.0` and has no runtime dependencies.
+
+```sh
+nvm install
+nvm use
+npm ci
+npm run check
+npm run build
+npm start
 ```
 
-Setup auto-detects existing MCP servers and project roots, installs only missing dependencies, configures the secure tunnel and auto-start services, opens the required ChatGPT pages, and finishes with a smoke test. Users should never need to edit TOML/JSON or manage services manually.
+`npm run check` is the exact repository-wide check. The automated integration tests start the stdio server with temporary home directories and no credentials, browser, service, tunnel, or user configuration.
 
-The design avoids GPT Actions, OpenAPI generation, public ingress, custom OAuth, OpenAI model API calls, a Codex runtime dependency, and model-driven polling.
+The default server exposes:
 
-The first milestone is a compatibility gate proving direct MCP results, chaining, long-running calls, confirmations, reconnect behavior, and tool refresh through a private plugin.
+- `compat_ping`
+- `compat_echo`
+- `compat_sleep`
+- `compat_sequence_increment`
+- `compat_sequence_read`
+- `compat_write_marker`
 
-See [`PLAN.md`](./PLAN.md) for the concise implementation plan.
+Set `LOCAL_DEV_COMPAT_ENABLE_REFRESH_PROBE=1` before startup to add the temporary `compat_refresh_probe` discovery tool.
 
-No production code has been implemented yet.
+## Real-tunnel checkpoint on macOS
+
+Never commit or paste the runtime key. Use a new local profile so the existing demo backend can remain recoverable until the benchmark is confirmed.
+
+```sh
+cd /ABSOLUTE/PATH/chatgpt-local-dev-plugin
+nvm use
+npm ci
+npm run build
+
+export CONTROL_PLANE_API_KEY="<RUNTIME_KEY_IN_LOCAL_SHELL_ONLY>"
+
+tunnel-client init \
+  --sample sample_mcp_stdio_local \
+  --profile local-dev-compat \
+  --tunnel-id "<TUNNEL_ID>" \
+  --mcp-command "node /ABSOLUTE/PATH/chatgpt-local-dev-plugin/dist/server.js"
+
+tunnel-client doctor --profile local-dev-compat --explain
+tunnel-client run --profile local-dev-compat
+```
+
+In ChatGPT, enable Developer Mode, open **Settings -> Plugins**, create a draft app named **Local Dev Compatibility Gate**, choose **Tunnel**, and select the existing tunnel. Then run every prompt and fill every `UNVERIFIED` row in [`docs/compatibility.md`](./docs/compatibility.md).
+
+The official tunnel command shape can change; run `tunnel-client help quickstart` if the installed client rejects the documented `init` flags. Do not replace the stdio architecture with public ingress or polling.
+
+See [`PLAN.md`](./PLAN.md) for the full phased plan. Phases 2-6 remain intentionally unimplemented.
