@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { extname, join, relative } from "node:path";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const ignoredDirectories = new Set([".git", "dist", "node_modules"]);
+const ignoredDirectories = new Set([".astro", ".git", "dist", "node_modules"]);
 const sourceExtensions = new Set([".mjs", ".ts"]);
 const violations = [];
 
