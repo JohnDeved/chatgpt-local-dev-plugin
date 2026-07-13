@@ -37,11 +37,11 @@ The repository owner explicitly directed implementation to continue before every
 
 ### Implementation status (2026-07-13)
 
-Phases 2-5 are implemented. The production server now loads the shared Codex registry read-only, exposes the five native tools, manages one bounded background process, runs argv-only project hooks, and generically proxies selected stdio and Streamable HTTP MCP tools with pagination, inherited filters, aliases, metadata preservation, and required/optional availability behavior. The three-command setup surface performs verified dependency installation, previewed and reversible configuration, direct smoke testing, native tunnel connection/readiness checks, macOS login auto-start, status/repair, uninstall, and the ChatGPT handoff. Temporary-home and fake-server tests require no credentials, tunnel, browser, service, or user configuration. Phase 6 real-environment and reboot evidence remains.
+Phases 2-5 are implemented. The production server now loads the shared Codex registry read-only, exposes the five native tools, manages one bounded background process, runs argv-only project hooks, and generically proxies selected stdio and Streamable HTTP MCP tools with pagination, inherited filters, aliases, metadata preservation, and required/optional availability behavior. The three-command setup surface performs verified dependency installation, previewed and reversible configuration, direct smoke testing, native tunnel connection/readiness checks, macOS login auto-start, status/repair, uninstall, and the ChatGPT handoff. Temporary-home and fake-server tests require no credentials, tunnel, browser, service, or user configuration.
 
 The temporary Phase 1 `ping` tool is intentionally absent from production. Phase 5 therefore proves the same local readiness property with a direct MCP initialize/list/`project.current` smoke call, then separately requires native tunnel `process_running`, `/healthz`, and `/readyz` success. This preserves direct request/response behavior without retaining a sixth custom tool.
 
-Phase 6 is in progress with evidence recorded in `docs/verification.md`. The real setup, combined native/downstream registry, Serena edit, repository check through `dev.run`, Chrome DevTools inspection, tunnel readiness, and login service have passed. Signed-in ChatGPT connector refresh/call and post-reboot repetition remain explicit unchecked requirements until user-authorized browser and reboot actions occur.
+Phase 6 is complete under the repository owner's explicit no-reboot scope decision, with evidence recorded in `docs/verification.md`. The real setup, combined native/downstream registry, Serena edit, repository check through `dev.run`, Chrome DevTools inspection, tunnel readiness, login service, and signed-in ChatGPT native/downstream connector calls passed. Post-reboot repetition was explicitly waived on 2026-07-13 and is not claimed as a pass.
 
 ## Shared MCP configuration
 
@@ -160,7 +160,7 @@ The project is complete when:
 - only the five native tools are custom;
 - Local Dev and `tunnel-client` start automatically;
 - config, project, command, proxy, reconnect, setup, and security cases are tested;
-- the complete coding/browser workflow passes after reboot;
+- the complete coding/browser workflow passes after reboot, unless the repository owner explicitly waives that disruptive validation for the implementation run; the 2026-07-13 run carries such a waiver and does not claim a reboot pass;
 - no public ingress, custom OAuth, Actions layer, database, or public shell exists.
 
 ## Known limits
