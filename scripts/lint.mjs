@@ -39,7 +39,6 @@ for (const path of await collect(root)) {
 
   if (relative(root, path).startsWith("src/")) {
     const prohibitedModules = [
-      "node:child_process",
       "node:dgram",
       "node:http",
       "node:https",
@@ -52,11 +51,20 @@ for (const path of await collect(root)) {
         report(path, "no-prohibited-runtime", `import of ${moduleName}`);
       }
     }
+    if (
+      source.includes('"node:child_process"') &&
+      !["src/core/process.ts", "src/setup/command.ts"].includes(relative(root, path))
+    ) {
+      report(path, "child-process-boundary", "child_process is restricted to core/process.ts");
+    }
+    if (
+      ["src/core/process.ts", "src/setup/command.ts"].includes(relative(root, path)) &&
+      (!source.includes("shell: false") || !source.includes("spawn("))
+    ) {
+      report(path, "no-shell-strings", "process execution must use spawn with shell: false");
+    }
     if (/\.stack\b/u.test(source)) {
       report(path, "no-stack-leak", "raw stack access is prohibited");
-    }
-    if (/\bfetch\s*\(/u.test(source)) {
-      report(path, "no-network", "Phase 1 server must not make network calls");
     }
     if (/console\.log\s*\(/u.test(source)) {
       report(path, "stdout-reserved", "stdout is reserved for MCP JSON-RPC");
@@ -65,12 +73,17 @@ for (const path of await collect(root)) {
 }
 
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-if (packageJson.dependencies && Object.keys(packageJson.dependencies).length > 0) {
-  violations.push("package.json: runtime-dependencies: Phase 1 must remain zero-runtime-dependency");
+const expectedDependencies = {
+  "@modelcontextprotocol/sdk": "1.29.0",
+  "smol-toml": "1.7.0",
+  "zod": "4.4.3",
+};
+if (JSON.stringify(packageJson.dependencies) !== JSON.stringify(expectedDependencies)) {
+  violations.push("package.json: runtime-dependencies: dependency set or exact versions changed");
 }
-const expectedDevDependencies = { typescript: "5.8.3" };
+const expectedDevDependencies = { "@types/node": "22.20.1", typescript: "5.8.3" };
 if (JSON.stringify(packageJson.devDependencies) !== JSON.stringify(expectedDevDependencies)) {
-  violations.push("package.json: dev-dependencies: expected only typescript@5.8.3");
+  violations.push("package.json: dev-dependencies: dependency set or exact versions changed");
 }
 if (packageJson.engines?.node !== ">=22.16.0 <23.0.0") {
   violations.push("package.json: node-range: expected >=22.16.0 <23.0.0");
