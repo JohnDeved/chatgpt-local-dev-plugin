@@ -19,7 +19,8 @@ This file separates automated coverage, real-environment evidence, and evidence 
 - [x] Through the namespaced Chrome DevTools tools, an isolated headless Chrome opened the live tunnel admin UI, evaluated its title/heading/health text, and produced a screenshot artifact.
 - [x] The resulting repository diff passed formatting, tests, `git diff --check`, and a credential-pattern scan; the only bearer-like match was an intentional fake value in an HTTP fixture.
 
-## Required final evidence
+## Final connector evidence and owner decision
 
-- [ ] Refresh the signed-in ChatGPT private connector and call the production namespaced registry through the Secure MCP Tunnel. Chrome, the ChatGPT Chrome Extension, and its native host all passed diagnostics, but the extension control connection was unavailable; opening a fresh Chrome window requires user permission.
-- [ ] Reboot macOS, then repeat `local-dev status`, native tunnel readiness, direct MCP smoke, and one private-connector call. A reboot is intentionally never initiated without explicit user permission.
+- [x] A fresh signed-in ChatGPT app named `Local Dev` was connected to the existing Secure MCP Tunnel after the earlier `Local Dev Tunnel` app was found to have a stale compatibility-only manifest. The production app exposed `project.current` and the namespaced downstream registry; the obsolete app was disconnected.
+- [x] In a signed-in ChatGPT Work conversation, `local_dev_project_current` returned the production structured result `{ "ok": true, "tool": "project.current", "data": { "path": null }, "error": null }`. `local_dev_serena_get_current_config` then reached Serena through the namespaced proxy and returned its expected no-active-project response, proving both native and downstream calls traversed the private connector.
+- Post-reboot repetition was explicitly waived by the repository owner on 2026-07-13 with the direction "Do not reboot." This is an owner-approved scope change, not a claimed reboot pass. Pre-reboot LaunchAgent, direct MCP smoke, native tunnel readiness, and signed-in connector evidence remain recorded above.

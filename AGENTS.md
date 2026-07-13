@@ -31,8 +31,8 @@ Phase 1 is normally a human compatibility gate. The repository owner explicitly 
 
 Do not add GPT Actions, an OpenAPI layer, public ingress, model-driven polling, custom OAuth, Cloudflare, OpenAI model API calls, a Codex runtime dependency, a database, multi-user state, shell command strings, per-server adapters, or speculative frameworks. Do not hide a failed compatibility result behind another transport or polling layer.
 
-Do not claim completion from unit/integration tests alone; Phase 6 requires real-environment and reboot evidence.
+Do not claim completion from unit/integration tests alone; Phase 6 requires real-environment evidence. Reboot evidence may only be omitted after an explicit repository-owner waiver, and the omission must not be represented as a pass.
 
 ## Current task
 
-Complete Phase 6: run setup against the real environment, exercise the coding and browser workflow through the private plugin, verify the diff, repeat the required smoke workflow after reboot, and record evidence without exposing credentials.
+Phase 6 was completed on 2026-07-13 with real-environment setup, coding/browser workflow, signed-in private-plugin calls, and diff verification. The repository owner explicitly directed that macOS not be rebooted; `docs/verification.md` records that scope waiver without claiming a reboot pass.
