@@ -2,25 +2,31 @@
   "name": "chatgpt-local-dev-plugin",
   "version": "0.1.0",
   "private": true,
-  "description": "Phase 1 stdio MCP compatibility gate for a private ChatGPT local development plugin.",
+  "description": "Private local-development MCP server for ChatGPT through OpenAI Secure MCP Tunnel.",
   "type": "module",
   "bin": {
-    "local-dev-compat": "dist/server.js"
+    "local-dev": "dist/cli.js"
   },
   "engines": {
     "node": ">=22.16.0 <23.0.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/make-bin-executable.mjs",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm test",
     "format": "node scripts/format.mjs",
     "format:check": "node scripts/format.mjs --check",
     "lint": "node scripts/lint.mjs",
-    "start": "node dist/server.js",
+    "start": "node dist/cli.js",
     "test": "node --test test/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "smol-toml": "1.7.0",
+    "zod": "4.4.3"
+  },
   "devDependencies": {
+    "@types/node": "22.20.1",
     "typescript": "5.8.3"
   },
   "license": "UNLICENSED"

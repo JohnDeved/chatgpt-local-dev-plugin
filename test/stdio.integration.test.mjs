@@ -1,27 +1,25 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 class McpProcess {
-  constructor(extraEnv = {}) {
+  constructor(env) {
     this.nextId = 1;
     this.pending = new Map();
     this.stderr = "";
     this.buffer = "";
-    this.process = spawn(process.execPath, ["dist/server.js"], {
+    this.process = spawn(process.execPath, ["dist/cli.js"], {
       cwd: new URL("../", import.meta.url),
-      env: { ...process.env, ...extraEnv },
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.process.stdout.setEncoding("utf8");
     this.process.stdout.on("data", (chunk) => this.#onData(chunk));
     this.process.stderr.setEncoding("utf8");
-    this.process.stderr.on("data", (chunk) => {
-      this.stderr += chunk;
-    });
+    this.process.stderr.on("data", (chunk) => { this.stderr += chunk; });
   }
 
   #onData(chunk) {
@@ -32,10 +30,10 @@ class McpProcess {
       this.buffer = this.buffer.slice(newline + 1);
       if (line.length > 0) {
         const message = JSON.parse(line);
-        const waiter = this.pending.get(JSON.stringify(message.id));
+        const waiter = this.pending.get(message.id);
         if (waiter) {
-          this.pending.delete(JSON.stringify(message.id));
-          waiter.resolve(message);
+          this.pending.delete(message.id);
+          waiter(message);
         }
       }
       newline = this.buffer.indexOf("\n");
@@ -44,23 +42,14 @@ class McpProcess {
 
   request(method, params) {
     const id = this.nextId++;
-    const message = { jsonrpc: "2.0", id, method };
-    if (params !== undefined) {
-      message.params = params;
-    }
     const response = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(JSON.stringify(id));
-        reject(new Error(`timeout waiting for ${method}`));
-      }, 3_000);
-      this.pending.set(JSON.stringify(id), {
-        resolve(value) {
-          clearTimeout(timer);
-          resolve(value);
-        },
+      const timer = setTimeout(() => reject(new Error(`timeout waiting for ${method}: ${this.stderr}`)), 5_000);
+      this.pending.set(id, (message) => {
+        clearTimeout(timer);
+        resolve(message);
       });
     });
-    this.process.stdin.write(`${JSON.stringify(message)}\n`);
+    this.process.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     return response;
   }
 
@@ -68,124 +57,169 @@ class McpProcess {
     this.process.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
   }
 
-  async close() {
-    this.process.stdin.end();
-    if (this.process.exitCode === null) {
-      this.process.kill("SIGTERM");
-    }
+  close() {
+    this.process.kill("SIGTERM");
   }
+}
+
+async function fixture({ hook = false, proxy = false } = {}) {
+  const home = await mkdtemp(join(tmpdir(), "local-dev-core-"));
+  const project = join(home, "projects", "demo");
+  await mkdir(join(home, ".codex"), { recursive: true });
+  await mkdir(join(home, ".local-dev"), { recursive: true });
+  await mkdir(project, { recursive: true });
+  const fakeServer = new URL("./fake-mcp-server.mjs", import.meta.url).pathname;
+  const codexConfig = proxy
+    ? `[mcp_servers.fake]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(fakeServer)}]\nenabled_tools = ["echo", "blocked"]\ndisabled_tools = ["blocked"]\nrequired = true\n`
+    : "# empty MCP registry\n";
+  await writeFile(join(home, ".codex", "config.toml"), codexConfig, "utf8");
+  const marker = join(project, "hook-ran");
+  await writeFile(join(home, ".local-dev", "config.json"), JSON.stringify({
+    version: 1,
+    projectRoots: [join(home, "projects")],
+    selectedServers: proxy ? [{ id: "fake", alias: "fixture" }] : [],
+    projectOpenHooks: hook ? [{
+      projectRoot: project,
+      argv: [process.execPath, "-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ok')`],
+    }] : [],
+  }), "utf8");
+  return { home, marker, project };
 }
 
 async function initialize(client) {
   const response = await client.request("initialize", {
     protocolVersion: "2025-06-18",
     capabilities: {},
-    clientInfo: { name: "phase-1-test", version: "1.0.0" },
+    clientInfo: { name: "core-test", version: "1.0.0" },
   });
   client.notify("notifications/initialized", {});
   return response;
 }
 
-test("stdio server initializes, lists tools, and handles a four-call chain", async () => {
-  const home = await mkdtemp(join(tmpdir(), "local-dev-integration-home-"));
-  const client = new McpProcess({ HOME: home });
+test("production stdio server exposes exactly five core tools", async () => {
+  const { home } = await fixture();
+  const client = new McpProcess({ ...process.env, HOME: home });
   try {
     const initialized = await initialize(client);
-    assert.deepEqual(initialized.result.serverInfo, {
-      name: "local-dev-compatibility-gate",
-      version: "0.1.0",
-    });
-    assert.equal(initialized.result.protocolVersion, "2025-06-18");
-
+    assert.deepEqual(initialized.result.serverInfo, { name: "local-dev", version: "0.3.0" });
     const listed = await client.request("tools/list", {});
-    assert.deepEqual(
-      listed.result.tools.map((tool) => tool.name),
-      [
-        "compat_ping",
-        "compat_echo",
-        "compat_sleep",
-        "compat_sequence_increment",
-        "compat_sequence_read",
-        "compat_write_marker",
-      ],
-    );
+    assert.deepEqual(listed.result.tools.map(({ name }) => name), [
+      "project.open",
+      "project.current",
+      "dev.run",
+      "dev.poll",
+      "dev.stop",
+    ]);
     for (const tool of listed.result.tools) {
       assert.equal(typeof tool.annotations.readOnlyHint, "boolean");
       assert.equal(tool.annotations.openWorldHint, false);
-      assert.equal(tool.annotations.destructiveHint, false);
       assert.ok(tool.outputSchema);
     }
-
-    const first = await client.request("tools/call", {
-      name: "compat_sequence_increment",
-      arguments: { by: 1 },
-    });
-    const second = await client.request("tools/call", {
-      name: "compat_sequence_increment",
-      arguments: { by: 2 },
-    });
-    const third = await client.request("tools/call", {
-      name: "compat_sequence_increment",
-      arguments: { by: 4 },
-    });
-    const fourth = await client.request("tools/call", {
-      name: "compat_sequence_read",
-      arguments: {},
-    });
-    assert.equal(first.result.structuredContent.data.value, 1);
-    assert.equal(second.result.structuredContent.data.value, 3);
-    assert.equal(third.result.structuredContent.data.value, 7);
-    assert.equal(fourth.result.structuredContent.data.value, 7);
     assert.equal(client.stderr, "");
   } finally {
-    await client.close();
+    client.close();
+    await rm(home, { recursive: true, force: true });
   }
 });
 
-test("stdio errors are machine-readable and do not expose stack traces", async () => {
-  const home = await mkdtemp(join(tmpdir(), "local-dev-integration-home-"));
-  const client = new McpProcess({ HOME: home });
+test("opens a configured project and runs argv without a shell", async () => {
+  const { home, project } = await fixture();
+  const client = new McpProcess({ ...process.env, HOME: home });
   try {
     await initialize(client);
-    const tooLarge = await client.request("tools/call", {
-      name: "compat_echo",
-      arguments: { value: "x", repeat: 16_385 },
+    const before = await client.request("tools/call", { name: "dev.run", arguments: { argv: [process.execPath, "--version"] } });
+    assert.equal(before.result.structuredContent.error.code, "NO_ACTIVE_PROJECT");
+    const opened = await client.request("tools/call", { name: "project.open", arguments: { query: "demo" } });
+    assert.equal(opened.result.structuredContent.data.path, await realpath(project));
+    const run = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: { argv: [process.execPath, "-e", "process.stdout.write('core-ok')"] },
     });
-    assert.equal(tooLarge.result.isError, true);
-    assert.equal(
-      tooLarge.result.structuredContent.error.code,
-      "OUTPUT_TOO_LARGE",
-    );
-    assert.doesNotMatch(JSON.stringify(tooLarge.result), /\bat\s+\S+\.js:/u);
-
-    const unknown = await client.request("tools/call", {
-      name: "compat_missing",
-      arguments: {},
+    assert.equal(run.result.structuredContent.ok, true);
+    assert.equal(run.result.structuredContent.data.exitCode, 0);
+    assert.equal(run.result.structuredContent.data.outputTail, "core-ok");
+    const missing = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: { argv: [join(home, "does-not-exist")] },
     });
-    assert.equal(unknown.result.structuredContent.error.code, "UNKNOWN_TOOL");
+    assert.equal(missing.result.structuredContent.error.code, "COMMAND_FAILED");
+    const invalid = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: { argv: [process.execPath, "--version"], timeoutMs: 120_001, unexpected: true },
+    });
+    assert.equal(invalid.result.structuredContent.error.code, "INVALID_ARGUMENTS");
+    const extra = await client.request("tools/call", { name: "project.current", arguments: { unexpected: true } });
+    assert.equal(extra.result.structuredContent.error.code, "INVALID_ARGUMENTS");
   } finally {
-    await client.close();
+    client.close();
+    await rm(home, { recursive: true, force: true });
   }
 });
 
-test("optional refresh probe changes the discovered tool list only when enabled", async () => {
-  const home = await mkdtemp(join(tmpdir(), "local-dev-refresh-home-"));
-  const client = new McpProcess({
-    HOME: home,
-    LOCAL_DEV_COMPAT_ENABLE_REFRESH_PROBE: "1",
-  });
+test("runs argv-based project hooks before activating a project", async () => {
+  const { home, marker } = await fixture({ hook: true });
+  const client = new McpProcess({ ...process.env, HOME: home });
+  try {
+    await initialize(client);
+    const opened = await client.request("tools/call", { name: "project.open", arguments: { query: "demo" } });
+    assert.equal(opened.result.structuredContent.ok, true);
+    assert.equal(opened.result.structuredContent.data.hooksRun, 1);
+    assert.equal(await readFile(marker, "utf8"), "ok");
+  } finally {
+    client.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("tracks one background process, detects loopback URLs, and stops it", async () => {
+  const { home } = await fixture();
+  const client = new McpProcess({ ...process.env, HOME: home });
+  try {
+    await initialize(client);
+    await client.request("tools/call", { name: "project.open", arguments: { query: "demo" } });
+    const started = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: {
+        argv: [process.execPath, "-e", "console.error('http://127.0.0.1:4321/ready');setInterval(()=>{},1000)"],
+        background: true,
+      },
+    });
+    assert.equal(started.result.structuredContent.data.state, "running");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const polled = await client.request("tools/call", { name: "dev.poll", arguments: {} });
+    assert.deepEqual(polled.result.structuredContent.data.urls, ["http://127.0.0.1:4321/ready"]);
+    const busy = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: { argv: [process.execPath, "--version"], background: true },
+    });
+    assert.equal(busy.result.structuredContent.error.code, "BACKGROUND_BUSY");
+    const stopped = await client.request("tools/call", { name: "dev.stop", arguments: {} });
+    assert.equal(stopped.result.structuredContent.data.state, "exited");
+  } finally {
+    client.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("paginates, filters, namespaces, preserves, and forwards downstream tools", async () => {
+  const { home } = await fixture({ proxy: true });
+  const client = new McpProcess({ ...process.env, HOME: home });
   try {
     await initialize(client);
     const listed = await client.request("tools/list", {});
-    assert.equal(listed.result.tools.at(-1).name, "compat_refresh_probe");
-    const called = await client.request("tools/call", {
-      name: "compat_refresh_probe",
-      arguments: {},
-    });
-    assert.deepEqual(called.result.structuredContent.data, {
-      token: "refresh-v2",
-    });
+    const downstream = listed.result.tools.find(({ name }) => name === "fixture.echo");
+    assert.ok(downstream);
+    assert.equal(listed.result.tools.some(({ name }) => name === "fixture.blocked"), false);
+    assert.equal(downstream.title, "Downstream echo");
+    assert.deepEqual(downstream.inputSchema.required, ["value"]);
+    assert.deepEqual(downstream.outputSchema.required, ["echoed"]);
+    assert.deepEqual(downstream.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+    assert.deepEqual(downstream._meta, { fixture: true });
+    const called = await client.request("tools/call", { name: "fixture.echo", arguments: { value: "proxied" } });
+    assert.equal(called.result.content[0].text, "echo=proxied");
+    assert.deepEqual(called.result.structuredContent, { echoed: "proxied" });
   } finally {
-    await client.close();
+    client.close();
+    await rm(home, { recursive: true, force: true });
   }
 });

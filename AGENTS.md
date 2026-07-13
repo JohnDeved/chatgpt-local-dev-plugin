@@ -25,14 +25,14 @@ It must pass formatting, policy lint, TypeScript typechecking, build, and tests 
 
 ## Hard checkpoint rule
 
-Phase 1 is a human compatibility gate. Stop after publishing the temporary benchmark server, automated tests, and checkpoint documentation. Do not begin Phase 2 until a human has run every real-tunnel row in `docs/compatibility.md`, replaced `UNVERIFIED` with observations, and explicitly approved continuation.
+Phase 1 is normally a human compatibility gate. The repository owner explicitly directed implementation to continue on 2026-07-13 after the exact ping, structured echo, tool refresh, and four-call chain passed through the real tunnel. Remaining Phase 1 rows stay unverified and must not be described as passing.
 
 ## Prohibited fallbacks
 
 Do not add GPT Actions, an OpenAPI layer, public ingress, model-driven polling, custom OAuth, Cloudflare, OpenAI model API calls, a Codex runtime dependency, a database, multi-user state, shell command strings, per-server adapters, or speculative frameworks. Do not hide a failed compatibility result behind another transport or polling layer.
 
-Do not implement shared-config loading, production native tools, downstream MCP proxying, setup automation, background services, or any Phase 2-6 behavior during the compatibility gate.
+Do not claim completion from unit/integration tests alone; Phase 6 requires real-environment and reboot evidence.
 
 ## Current task
 
-Implement and maintain only Phase 1: the temporary stdio MCP compatibility benchmark, its tests, and the human checkpoint runbook. Real Secure MCP Tunnel observations remain `UNVERIFIED` until recorded by the supervising human.
+Complete Phase 6: run setup against the real environment, exercise the coding and browser workflow through the private plugin, verify the diff, repeat the required smoke workflow after reboot, and record evidence without exposing credentials.

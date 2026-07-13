@@ -31,6 +31,18 @@ Proceed only when results return without model polling and chaining/reconnect be
 
 Current OpenAI tunnel documentation still accepts a local stdio command. The current official TypeScript SDK repository recommends split server/client packages, while the OpenAI Apps SDK example still shows the legacy combined package. To keep this temporary compatibility gate focused on transport behavior rather than package-version ambiguity, Phase 1 implements only the bounded MCP stdio subset it needs with Node built-ins and zero runtime dependencies. Revisit the production SDK choice only after the human checkpoint; this note does not authorize Phase 2 work.
 
+### Owner checkpoint waiver (2026-07-13)
+
+The repository owner explicitly directed implementation to continue before every long-running Phase 1 row was executed. Real tunnel tool refresh, exact ping, exact structured echo, and a four-call sequence chain passed without model polling; the remaining rows stay unverified in `docs/compatibility.md`. This is an explicit schedule waiver, not a fabricated compatibility pass, and it does not authorize fallback transports.
+
+### Implementation status (2026-07-13)
+
+Phases 2-5 are implemented. The production server now loads the shared Codex registry read-only, exposes the five native tools, manages one bounded background process, runs argv-only project hooks, and generically proxies selected stdio and Streamable HTTP MCP tools with pagination, inherited filters, aliases, metadata preservation, and required/optional availability behavior. The three-command setup surface performs verified dependency installation, previewed and reversible configuration, direct smoke testing, native tunnel connection/readiness checks, macOS login auto-start, status/repair, uninstall, and the ChatGPT handoff. Temporary-home and fake-server tests require no credentials, tunnel, browser, service, or user configuration. Phase 6 real-environment and reboot evidence remains.
+
+The temporary Phase 1 `ping` tool is intentionally absent from production. Phase 5 therefore proves the same local readiness property with a direct MCP initialize/list/`project.current` smoke call, then separately requires native tunnel `process_running`, `/healthz`, and `/readyz` success. This preserves direct request/response behavior without retaining a sixth custom tool.
+
+Phase 6 is in progress with evidence recorded in `docs/verification.md`. The real setup, combined native/downstream registry, Serena edit, repository check through `dev.run`, Chrome DevTools inspection, tunnel readiness, and login service have passed. Signed-in ChatGPT connector refresh/call and post-reboot repetition remain explicit unchecked requirements until user-authorized browser and reboot actions occur.
+
 ## Shared MCP configuration
 
 Use `~/.codex/config.toml` as the canonical MCP registry shared with the ChatGPT desktop app, Codex CLI, and Codex IDE extension.
