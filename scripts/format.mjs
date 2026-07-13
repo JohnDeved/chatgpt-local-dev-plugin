@@ -5,7 +5,7 @@ import { extname, join, relative } from "node:path";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const checkOnly = process.argv.includes("--check");
 const supportedExtensions = new Set([".json", ".md", ".mjs", ".ts", ".yaml", ".yml"]);
-const ignoredDirectories = new Set([".git", "dist", "node_modules"]);
+const ignoredDirectories = new Set([".astro", ".git", "dist", "node_modules"]);
 
 async function collect(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
