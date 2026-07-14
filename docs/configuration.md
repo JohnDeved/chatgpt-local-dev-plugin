@@ -28,7 +28,7 @@ Local Dev uses this versioned shape:
 }
 ```
 
-Project roots must be absolute and unique. Server ids and aliases must be unique. Hooks use argument arrays only; shell strings are rejected. Local Dev rejects unknown fields to catch misspellings.
+Project roots must be absolute and unique. `project.open` matches directories by folder name, `package.json` name, or Git remote repository name, so renamed worktrees can still be opened by their canonical project name. Metadata reads are local and bounded. Server ids and aliases must be unique. Hooks use argument arrays only; shell strings are rejected. Local Dev rejects unknown fields to catch misspellings.
 
 `inlineMedia` is an explicit per-server opt-in for MCP tools that return an absolute local media path as text instead of a native media content block. Local Dev preserves the text result, appends a canonical MCP `image` or `audio` block, adds a compact media-count `structuredContent` value when the downstream result has none, and links an MCP Apps viewer to the affected tools so compatible hosts can render the media inline. A file is included only when it resolves inside an allowlisted absolute root, matches a supported media signature, and does not exceed `maxBytes` (5 MiB by default, 25 MiB maximum). Native MCP media blocks pass through unchanged. Use the optional non-empty `tools` list to scope both conversion and the viewer to specific original downstream tool names; omitting it enables all tools on that selected server. Existing downstream structured content and UI templates are never replaced. Keep roots narrow; `/tmp` covers Chrome DevTools MCP screenshots on macOS.
 
