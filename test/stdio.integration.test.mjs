@@ -68,6 +68,7 @@ async function fixture({ hook = false, proxy = false } = {}) {
   await mkdir(join(home, ".codex"), { recursive: true });
   await mkdir(join(home, ".local-dev"), { recursive: true });
   await mkdir(project, { recursive: true });
+  await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo-project" }), "utf8");
   const fakeServer = new URL("./fake-mcp-server.mjs", import.meta.url).pathname;
   const codexConfig = proxy
     ? `[mcp_servers.fake]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(fakeServer)}]\nenabled_tools = ["echo", "blocked"]\ndisabled_tools = ["blocked"]\nrequired = true\n`
@@ -96,7 +97,7 @@ async function initialize(client) {
   return response;
 }
 
-test("production stdio server exposes exactly five core tools", async () => {
+test("production stdio server exposes native tools and MCP Apps widgets", async () => {
   const { home } = await fixture();
   const client = new McpProcess({ ...process.env, HOME: home });
   try {
@@ -104,27 +105,64 @@ test("production stdio server exposes exactly five core tools", async () => {
     assert.deepEqual(initialized.result.serverInfo, { name: "local-dev", version: "0.3.0" });
     assert.deepEqual(initialized.result.capabilities.resources, {});
     const resources = await client.request("resources/list", {});
-    assert.equal(resources.result.resources[0].uri, "ui://widget/local-dev-media-v1.html");
+    assert.deepEqual(resources.result.resources.map(({ uri }) => uri), [
+      "ui://widget/local-dev-media-v1.html",
+      "ui://widget/local-dev-command-v1.html",
+      "ui://widget/local-dev-projects-v1.html",
+      "ui://widget/local-dev-calls-v1.html",
+      "ui://widget/local-dev-question-v1.html",
+    ]);
     const viewer = await client.request("resources/read", { uri: "ui://widget/local-dev-media-v1.html" });
     assert.equal(viewer.result.contents[0].mimeType, "text/html;profile=mcp-app");
     assert.match(viewer.result.contents[0].text, /ui\/notifications\/tool-result/u);
+    const questionWidget = await client.request("resources/read", { uri: "ui://widget/local-dev-question-v1.html" });
+    assert.equal(questionWidget.result.contents[0].mimeType, "text/html;profile=mcp-app");
+    assert.match(questionWidget.result.contents[0].text, /sendFollowUpMessage|ui\/message/u);
     const listed = await client.request("tools/list", {});
     assert.deepEqual(listed.result.tools.map(({ name }) => name), [
       "project.open",
+      "project.list",
       "project.current",
       "dev.run",
       "dev.poll",
       "dev.stop",
+      "question.ask",
+      "observability.recent_calls",
     ]);
     for (const tool of listed.result.tools) {
       assert.equal(typeof tool.annotations.readOnlyHint, "boolean");
       assert.equal(tool.annotations.openWorldHint, false);
       assert.ok(tool.outputSchema);
     }
+    const visualTools = new Map(listed.result.tools.map((tool) => [tool.name, tool]));
+    assert.equal(visualTools.get("project.list")._meta.ui.resourceUri, "ui://widget/local-dev-projects-v1.html");
+    assert.equal(visualTools.get("dev.run")._meta.ui.resourceUri, "ui://widget/local-dev-command-v1.html");
+    assert.equal(visualTools.get("question.ask")._meta.ui.resourceUri, "ui://widget/local-dev-question-v1.html");
+    assert.equal(visualTools.get("question.ask").annotations.idempotentHint, false);
     await client.request("tools/call", { name: "project.current", arguments: {} });
+    const projectList = await client.request("tools/call", { name: "project.list", arguments: {} });
+    assert.equal(projectList.result.structuredContent.data.projects[0].name, "demo-project");
+    const questions = await client.request("tools/call", {
+      name: "question.ask",
+      arguments: {
+        title: "Choose implementation details",
+        questions: [{
+          id: "stack",
+          header: "Stack",
+          question: "Which UI stack should be used?",
+          options: [{ id: "vanilla", label: "Vanilla" }, { id: "react", label: "React" }],
+        }],
+      },
+    });
+    assert.equal(questions.result.structuredContent.data.questions[0].allowCustom, true);
+    assert.equal(typeof questions.result.structuredContent.data.requestId, "string");
+    const recent = await client.request("tools/call", { name: "observability.recent_calls", arguments: { limit: 10 } });
+    assert.equal(recent.result.structuredContent.data.calls.some(({ tool }) => tool === "project.current"), true);
+    assert.equal(recent.result.structuredContent.data.calls.some(({ tool }) => tool === "observability.recent_calls"), false);
     const dashboardUrl = (await readFile(join(home, ".local-dev", "dashboard.url"), "utf8")).trim();
     const dashboardCalls = await fetch(new URL("api/calls", dashboardUrl)).then((response) => response.json());
-    assert.equal(dashboardCalls[0].tool, "project.current");
+    assert.equal(dashboardCalls.some(({ tool }) => tool === "project.current"), true);
+    assert.equal(dashboardCalls[0].tool, "observability.recent_calls");
     assert.equal(client.stderr, "");
   } finally {
     client.close();
@@ -148,6 +186,12 @@ test("opens a configured project and runs argv without a shell", async () => {
     assert.equal(run.result.structuredContent.ok, true);
     assert.equal(run.result.structuredContent.data.exitCode, 0);
     assert.equal(run.result.structuredContent.data.outputTail, "core-ok");
+    assert.deepEqual(run.result.structuredContent.data.argv, [process.execPath, "-e", "process.stdout.write('core-ok')"]);
+    assert.equal(run.result.structuredContent.data.cwd, await realpath(project));
+    assert.equal(run.result.structuredContent.data.background, false);
+    assert.equal(typeof run.result.structuredContent.data.startedAt, "string");
+    assert.equal(typeof run.result.structuredContent.data.finishedAt, "string");
+    assert.equal(new Date(run.result.structuredContent.data.finishedAt) >= new Date(run.result.structuredContent.data.startedAt), true);
     const missing = await client.request("tools/call", {
       name: "dev.run",
       arguments: { argv: [join(home, "does-not-exist")] },
@@ -224,7 +268,16 @@ test("paginates, filters, namespaces, preserves, and forwards downstream tools",
     assert.deepEqual(downstream.inputSchema.required, ["value"]);
     assert.deepEqual(downstream.outputSchema.required, ["echoed"]);
     assert.deepEqual(downstream.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
-    assert.deepEqual(downstream._meta, { fixture: true });
+    assert.equal(downstream._meta.fixture, true);
+    assert.match(downstream._meta.ui.resourceUri, /^ui:\/\/local-dev\/fixture\/[a-f0-9]{20}\.html$/u);
+    assert.equal(downstream._meta["openai/outputTemplate"], downstream._meta.ui.resourceUri);
+    const resources = await client.request("resources/list", {});
+    const proxiedResource = resources.result.resources.find(({ uri }) => uri === downstream._meta.ui.resourceUri);
+    assert.ok(proxiedResource);
+    assert.equal(proxiedResource.name, "fixture: Downstream echo widget");
+    const resource = await client.request("resources/read", { uri: downstream._meta.ui.resourceUri });
+    assert.equal(resource.result.contents[0].uri, downstream._meta.ui.resourceUri);
+    assert.match(resource.result.contents[0].text, /Downstream widget/u);
     const called = await client.request("tools/call", { name: "fixture.echo", arguments: { value: "proxied" } });
     assert.equal(called.result.content[0].text, "echo=proxied");
     assert.deepEqual(called.result.structuredContent, { echoed: "proxied" });

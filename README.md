@@ -26,15 +26,32 @@ npm start
 
 `npm run check` is the exact repository-wide check. The automated integration tests start the stdio server with temporary home directories and no credentials, browser, service, tunnel, or user configuration.
 
-The production server exposes exactly five native tools:
+The production server exposes eight native tools:
 
 - `project.open`
+- `project.list`
 - `project.current`
 - `dev.run`
 - `dev.poll`
 - `dev.stop`
+- `question.ask`
+- `observability.recent_calls`
 
 It reads the shared Codex MCP registry from `~/.codex/config.toml` without modifying it. Local-only project roots, selected downstream server aliases, optional allowlisted local-media inlining, and argv-based project hooks live in `~/.local-dev/config.json`; see [`docs/configuration.md`](./docs/configuration.md). Selected stdio and Streamable HTTP servers are discovered with pagination, filtered using the Codex settings, namespaced as `<alias>.<tool>`, and forwarded generically.
+
+## ChatGPT UI
+
+Local Dev includes MCP Apps widgets rendered directly in ChatGPT:
+
+- A command/process card for foreground results and the tracked background process, including bounded output, refresh/stop actions, and detected preview URLs.
+- A searchable project picker backed by `project.list` and `project.open`.
+- A recent-call inspector backed by the redacted in-memory journal.
+- A structured question form for one to four agent questions, with single- or multi-select options and custom answers. Submitted answers are posted back into the conversation so the agent can continue.
+- The existing image/audio viewer for allowlisted local media.
+
+Downstream MCP tools that advertise an MCP Apps resource have their UI URI namespaced and rewritten through Local Dev. The referenced resource is read from the downstream server on demand. Self-contained HTML widgets are the safest compatibility target; downstream widgets remain responsible for valid CSP metadata and reachable external assets.
+
+See [`docs/chatgpt-ui.md`](./docs/chatgpt-ui.md) for the UI architecture, tool contracts, and extension plan.
 
 ## Call dashboard
 

@@ -10,6 +10,11 @@ export interface ProcessSnapshot {
   pid: number | null;
   exitCode: number | null;
   signal: string | null;
+  argv: string[];
+  cwd: string | null;
+  background: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
   outputTail: string;
   truncated: boolean;
   urls: string[];
@@ -21,6 +26,11 @@ interface TrackedProcess {
   truncated: boolean;
   exitCode: number | null;
   signal: string | null;
+  argv: string[];
+  cwd: string;
+  background: boolean;
+  startedAt: string;
+  finishedAt: string | null;
   exited: Promise<void>;
   started: Promise<boolean>;
   spawnError: boolean;
@@ -36,20 +46,38 @@ function append(tracked: TrackedProcess, chunk: Buffer): void {
 
 function snapshot(tracked: TrackedProcess | undefined): ProcessSnapshot {
   if (tracked === undefined) {
-    return { state: "idle", pid: null, exitCode: null, signal: null, outputTail: "", truncated: false, urls: [] };
+    return {
+      state: "idle",
+      pid: null,
+      exitCode: null,
+      signal: null,
+      argv: [],
+      cwd: null,
+      background: false,
+      startedAt: null,
+      finishedAt: null,
+      outputTail: "",
+      truncated: false,
+      urls: [],
+    };
   }
   return {
-    state: tracked.exitCode === null && tracked.signal === null ? "running" : "exited",
+    state: tracked.finishedAt === null ? "running" : "exited",
     pid: tracked.child.pid ?? null,
     exitCode: tracked.exitCode,
     signal: tracked.signal,
+    argv: [...tracked.argv],
+    cwd: tracked.cwd,
+    background: tracked.background,
+    startedAt: tracked.startedAt,
+    finishedAt: tracked.finishedAt,
     outputTail: tracked.output,
     truncated: tracked.truncated,
     urls: [...new Set(tracked.output.match(LOOPBACK_URL) ?? [])].slice(0, 16),
   };
 }
 
-function start(argv: string[], cwd: string): TrackedProcess {
+function start(argv: string[], cwd: string, background: boolean): TrackedProcess {
   const child = spawn(argv[0] as string, argv.slice(1), {
     cwd,
     env: process.env,
@@ -64,6 +92,11 @@ function start(argv: string[], cwd: string): TrackedProcess {
     truncated: false,
     exitCode: null,
     signal: null,
+    argv: [...argv],
+    cwd,
+    background,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
     exited: new Promise((resolve) => {
       resolveExit = resolve;
     }),
@@ -83,6 +116,7 @@ function start(argv: string[], cwd: string): TrackedProcess {
   child.on("close", (code, signal) => {
     tracked.exitCode = code;
     tracked.signal = signal;
+    tracked.finishedAt = new Date().toISOString();
     resolveExit();
   });
   return tracked;
@@ -101,7 +135,7 @@ export class ProcessManager {
     }
     if (background) {
       if (this.hasRunningBackground()) throw new Error("BACKGROUND_BUSY");
-      this.background = start(argv, cwd);
+      this.background = start(argv, cwd, true);
       if (!(await this.background.started)) {
         await this.background.exited;
         this.background = undefined;
@@ -109,7 +143,7 @@ export class ProcessManager {
       }
       return snapshot(this.background);
     }
-    const tracked = start(argv, cwd);
+    const tracked = start(argv, cwd, false);
     if (!(await tracked.started)) {
       await tracked.exited;
       throw new Error("COMMAND_FAILED");

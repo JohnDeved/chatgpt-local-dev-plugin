@@ -4,7 +4,7 @@ import { realpath } from "node:fs/promises";
 
 import type { ProjectOpenHook } from "../config/types.js";
 import { ProcessManager, type ProcessSnapshot } from "./process.js";
-import { resolveProject } from "./project.js";
+import { listProjects, resolveProject } from "./project.js";
 
 function processData(snapshot: ProcessSnapshot): JsonValue {
   return { ...snapshot };
@@ -51,6 +51,15 @@ export class CoreRuntime {
 
   currentProject(): ToolCallResult {
     return success("project.current", { path: this.activeProject }, this.activeProject === null ? "no active project" : `active=${this.activeProject}`);
+  }
+
+  async projects(): Promise<ToolCallResult> {
+    const projects = await listProjects(this.roots);
+    return success(
+      "project.list",
+      { activePath: this.activeProject, projects } as unknown as JsonValue,
+      `${projects.length} projects`,
+    );
   }
 
   async run(argv: string[], background: boolean, timeoutMs?: number): Promise<ToolCallResult> {

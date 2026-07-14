@@ -16,6 +16,23 @@ const IGNORED = new Set([
 const MAX_VISITED = 4096;
 const MAX_DEPTH = 4;
 const MAX_METADATA_BYTES = 64 * 1024;
+const MAX_LISTED_PROJECTS = 200;
+const PROJECT_MARKERS = new Set([
+  "package.json",
+  "pyproject.toml",
+  "Cargo.toml",
+  "go.mod",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+]);
+
+export interface ProjectSummary {
+  path: string;
+  name: string;
+  aliases: string[];
+  root: string;
+}
 
 function inside(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
@@ -73,6 +90,47 @@ async function projectNames(path: string, entries?: Dirent[]): Promise<string[]>
     }
   }
   return [...names];
+}
+
+function projectLike(entries: Dirent[], depth: number): boolean {
+  if (depth === 0) return true;
+  return entries.some((entry) => entry.name === ".git" || PROJECT_MARKERS.has(entry.name));
+}
+
+export async function listProjects(roots: string[]): Promise<ProjectSummary[]> {
+  const projects = new Map<string, ProjectSummary>();
+  let visited = 0;
+  for (const configuredRoot of roots) {
+    const root = await validatedDirectory(configuredRoot, configuredRoot);
+    if (root === undefined) continue;
+    const queue: Array<{ path: string; depth: number }> = [{ path: root, depth: 0 }];
+    while (queue.length > 0 && visited < MAX_VISITED && projects.size < MAX_LISTED_PROJECTS) {
+      const current = queue.shift();
+      if (current === undefined) break;
+      visited += 1;
+      let entries: Dirent[];
+      try {
+        entries = await readdir(current.path, { withFileTypes: true });
+      } catch {
+        entries = [];
+      }
+      if (projectLike(entries, current.depth)) {
+        const aliases = await projectNames(current.path, entries);
+        projects.set(current.path, {
+          path: current.path,
+          name: aliases[1] ?? aliases[0] ?? basename(current.path),
+          aliases,
+          root,
+        });
+      }
+      if (current.depth >= MAX_DEPTH) continue;
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.isSymbolicLink() || IGNORED.has(entry.name)) continue;
+        queue.push({ path: resolve(current.path, entry.name), depth: current.depth + 1 });
+      }
+    }
+  }
+  return [...projects.values()].sort((left, right) => left.name.localeCompare(right.name) || left.path.localeCompare(right.path));
 }
 
 export async function resolveProject(query: string, roots: string[]): Promise<string[]> {
