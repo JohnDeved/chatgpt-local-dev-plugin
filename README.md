@@ -1,30 +1,64 @@
 # Local Dev Plugin
 
-A planned private ChatGPT Developer Mode plugin that works directly on local projects through native MCP tools and OpenAI Secure MCP Tunnel.
+Local Dev is a private MCP server for this architecture:
 
 ```text
 ChatGPT Developer Mode
-  → OpenAI Secure MCP Tunnel
-  → tunnel-client
-  → Local Dev stdio MCP server
-      → native project/command tools
-      → selected MCP servers from ~/.codex/config.toml
+  -> OpenAI Secure MCP Tunnel
+  -> tunnel-client
+  -> Local Dev stdio MCP server
 ```
 
-Local Dev reuses the MCP registry shared by the ChatGPT desktop app, Codex CLI, and Codex IDE extension. Its own config stores only project roots, selected server IDs, aliases, and project hooks.
+The owner explicitly waived the unfinished long-running compatibility rows after the real tunnel passed refresh, ping, structured echo, and a four-call chain. The remaining evidence is still marked `UNVERIFIED` in [`docs/compatibility.md`](./docs/compatibility.md).
 
-The target setup experience is:
+## Core server
 
-```text
+The package targets macOS with Node `22.16.0`.
+
+```sh
+nvm install
+nvm use
+npm ci
+npm run check
+npm run build
+npm start
+```
+
+`npm run check` is the exact repository-wide check. The automated integration tests start the stdio server with temporary home directories and no credentials, browser, service, tunnel, or user configuration.
+
+The production server exposes exactly five native tools:
+
+- `project.open`
+- `project.current`
+- `dev.run`
+- `dev.poll`
+- `dev.stop`
+
+It reads the shared Codex MCP registry from `~/.codex/config.toml` without modifying it. Local-only project roots, selected downstream server aliases, optional allowlisted local-media inlining, and argv-based project hooks live in `~/.local-dev/config.json`; see [`docs/configuration.md`](./docs/configuration.md). Selected stdio and Streamable HTTP servers are discovered with pagination, filtered using the Codex settings, namespaced as `<alias>.<tool>`, and forwarded generically.
+
+## Call dashboard
+
+While the tunnel runtime is running, open the private local dashboard with:
+
+```sh
+local-dev dashboard
+```
+
+The dashboard shows native and proxied MCP calls live, including the exact tool name, server alias, redacted arguments, status, duration, bounded result data, and image/audio metadata. It listens only on an ephemeral `127.0.0.1` port behind a random per-runtime URL token; the URL is stored locally with user-only permissions. Calls are held in a 200-entry in-memory ring and are never persisted to a database. Credential-like fields and base64 media bytes are redacted. See [`docs/dashboard.md`](./docs/dashboard.md).
+
+## Set up
+
+```sh
+cd /ABSOLUTE/PATH/chatgpt-local-dev-plugin
+nvm use
+npm ci
+npm run build
+npm link
 local-dev setup
 ```
 
-Setup auto-detects existing MCP servers and project roots, installs only missing dependencies, configures the secure tunnel and auto-start services, opens the required ChatGPT pages, and finishes with a smoke test. Users should never need to edit TOML/JSON or manage services manually.
+Setup is resumable and doubles as repair/reconfiguration. Use `local-dev status` for a concise health report, `local-dev status --json` for automation, and `local-dev uninstall` to remove the login service and Local Dev state without deleting shared Codex MCP entries. See [`docs/setup.md`](./docs/setup.md) for write, backup, tunnel, service, and rollback behavior.
 
-The design avoids GPT Actions, OpenAPI generation, public ingress, custom OAuth, OpenAI model API calls, a Codex runtime dependency, and model-driven polling.
+Never commit or paste tunnel or downstream credentials. Use an `env:NAME` or `file:/absolute/path` reference for the runtime key; no public ingress or polling fallback is used.
 
-The first milestone is a compatibility gate proving direct MCP results, chaining, long-running calls, confirmations, reconnect behavior, and tool refresh through a private plugin.
-
-See [`PLAN.md`](./PLAN.md) for the concise implementation plan.
-
-No production code has been implemented yet.
+See [`PLAN.md`](./PLAN.md) for the full phased plan.
