@@ -41,6 +41,7 @@ function clipped(value: string): string {
 }
 
 function safeValue(value: unknown, key = "", depth = 0): unknown {
+  if (key === "localDevDiff") return "[widget-only diff omitted]";
   if (SENSITIVE_KEY.test(key)) return "[redacted]";
   if (value === null || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value === "string") return SENSITIVE_VALUE.test(value) ? "[redacted]" : clipped(value);

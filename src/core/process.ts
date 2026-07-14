@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawnCommand, type SpawnedCommand } from "./command.js";
 
 const MAX_OUTPUT_CHARS = 65_536;
 const MAX_TIMEOUT_MS = 120_000;
@@ -21,7 +21,7 @@ export interface ProcessSnapshot {
 }
 
 interface TrackedProcess {
-  child: ChildProcessWithoutNullStreams;
+  child: SpawnedCommand;
   output: string;
   truncated: boolean;
   exitCode: number | null;
@@ -78,12 +78,7 @@ function snapshot(tracked: TrackedProcess | undefined): ProcessSnapshot {
 }
 
 function start(argv: string[], cwd: string, background: boolean): TrackedProcess {
-  const child = spawn(argv[0] as string, argv.slice(1), {
-    cwd,
-    env: process.env,
-    shell: false,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const child = spawnCommand(argv, cwd);
   let resolveExit: () => void = () => undefined;
   let resolveStarted: (started: boolean) => void = () => undefined;
   const tracked: TrackedProcess = {

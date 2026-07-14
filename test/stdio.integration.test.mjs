@@ -107,7 +107,7 @@ test("production stdio server exposes native tools and MCP Apps widgets", async 
     const resources = await client.request("resources/list", {});
     assert.deepEqual(resources.result.resources.map(({ uri }) => uri), [
       "ui://widget/local-dev-media-v1.html",
-      "ui://widget/local-dev-command-v1.html",
+      "ui://widget/local-dev-command-v2.html",
       "ui://widget/local-dev-projects-v1.html",
       "ui://widget/local-dev-calls-v1.html",
       "ui://widget/local-dev-question-v1.html",
@@ -126,6 +126,7 @@ test("production stdio server exposes native tools and MCP Apps widgets", async 
       "dev.run",
       "dev.poll",
       "dev.stop",
+      "dev.diff",
       "question.ask",
       "observability.recent_calls",
     ]);
@@ -136,7 +137,10 @@ test("production stdio server exposes native tools and MCP Apps widgets", async 
     }
     const visualTools = new Map(listed.result.tools.map((tool) => [tool.name, tool]));
     assert.equal(visualTools.get("project.list")._meta.ui.resourceUri, "ui://widget/local-dev-projects-v1.html");
-    assert.equal(visualTools.get("dev.run")._meta.ui.resourceUri, "ui://widget/local-dev-command-v1.html");
+    assert.equal(visualTools.get("dev.run")._meta, undefined);
+    assert.equal(visualTools.get("dev.poll")._meta, undefined);
+    assert.equal(visualTools.get("dev.stop")._meta, undefined);
+    assert.equal(visualTools.get("dev.diff")._meta.ui.resourceUri, "ui://widget/local-dev-command-v2.html");
     assert.equal(visualTools.get("question.ask")._meta.ui.resourceUri, "ui://widget/local-dev-question-v1.html");
     assert.equal(visualTools.get("question.ask").annotations.idempotentHint, false);
     await client.request("tools/call", { name: "project.current", arguments: {} });

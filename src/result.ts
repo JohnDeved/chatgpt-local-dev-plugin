@@ -9,6 +9,7 @@ export function success(
   tool: string,
   data: JsonValue,
   summary: string,
+  metadata?: Record<string, unknown>,
 ): ToolCallResult {
   const structuredContent: StructuredResult = {
     ok: true,
@@ -20,6 +21,7 @@ export function success(
   return {
     structuredContent,
     content: [{ type: "text", text: `${tool} ok: ${summary}` }],
+    ...(metadata === undefined ? {} : { _meta: metadata }),
   };
 }
 

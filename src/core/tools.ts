@@ -69,7 +69,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
       call: (input) => Object.keys(input).length === 0 ? result(runtime.currentProject()) : invalid("project.current"),
     },
     {
-      tool: attachWidget({
+      tool: {
         name: "dev.run",
         title: "Run development command",
         description: "Use this when you need to run one argv-based development command in the active project with bounded output and time.",
@@ -85,7 +85,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         },
         outputSchema: envelope,
         annotations: annotations(false, true, false),
-      }, COMMAND_WIDGET_URI, "Running command…", "Command finished"),
+      },
       call: async (input) => {
         if (!Array.isArray(input.argv) || input.argv.length === 0 || input.argv.length > 128 || input.argv.some((part) => typeof part !== "string" || part.length === 0)) return invalid("dev.run");
         if (input.background !== undefined && typeof input.background !== "boolean") return invalid("dev.run");
@@ -95,26 +95,37 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
       },
     },
     {
-      tool: attachWidget({
+      tool: {
         name: "dev.poll",
         title: "Poll background process",
         description: "Use this when you need the latest state, output tail, exit status, or preview URLs for the tracked background process.",
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
         outputSchema: envelope,
         annotations: annotations(true, false, true),
-      }, COMMAND_WIDGET_URI, "Refreshing process…", "Process updated"),
-      call: (input) => Object.keys(input).length === 0 ? result(runtime.poll()) : invalid("dev.poll"),
+      },
+      call: async (input) => Object.keys(input).length === 0 ? result(await runtime.poll()) : invalid("dev.poll"),
     },
     {
-      tool: attachWidget({
+      tool: {
         name: "dev.stop",
         title: "Stop background process",
         description: "Use this when the tracked local background process should be terminated and cleared.",
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
         outputSchema: envelope,
         annotations: annotations(false, true, true),
-      }, COMMAND_WIDGET_URI, "Stopping process…", "Process stopped"),
+      },
       call: async (input) => Object.keys(input).length === 0 ? result(await runtime.stop()) : invalid("dev.stop"),
+    },
+    {
+      tool: attachWidget({
+        name: "dev.diff",
+        title: "Show project changes",
+        description: "Use this after changing, creating, deleting, or renaming files to show the current active project's Git working-tree diff.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        outputSchema: envelope,
+        annotations: annotations(true, false, true),
+      }, COMMAND_WIDGET_URI, "Reading changes…", "Changes ready"),
+      call: async (input) => Object.keys(input).length === 0 ? result(await runtime.diff()) : invalid("dev.diff"),
     },
   ];
 }

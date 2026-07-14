@@ -64,12 +64,12 @@ for (const path of await collect(root)) {
     }
     if (
       source.includes('"node:child_process"') &&
-      !["src/core/process.ts", "src/setup/command.ts"].includes(relative(root, path))
+      !["src/core/command.ts", "src/setup/command.ts"].includes(relative(root, path))
     ) {
-      report(path, "child-process-boundary", "child_process is restricted to core/process.ts");
+      report(path, "child-process-boundary", "child_process is restricted to command boundary modules");
     }
     if (
-      ["src/core/process.ts", "src/setup/command.ts"].includes(relative(root, path)) &&
+      ["src/core/command.ts", "src/setup/command.ts"].includes(relative(root, path)) &&
       (!source.includes("shell: false") || !source.includes("spawn("))
     ) {
       report(path, "no-shell-strings", "process execution must use spawn with shell: false");

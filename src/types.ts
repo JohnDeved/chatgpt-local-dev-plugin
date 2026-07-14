@@ -18,6 +18,7 @@ export interface StructuredResult {
 export interface ToolCallResult {
   structuredContent: StructuredResult;
   content: Array<{ type: "text"; text: string }>;
+  _meta?: Record<string, unknown>;
   isError?: boolean;
 }
 

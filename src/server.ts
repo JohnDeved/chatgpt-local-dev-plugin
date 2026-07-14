@@ -39,7 +39,7 @@ export async function runServer(): Promise<void> {
     {
       capabilities: { resources: {}, tools: {} },
       instructions:
-        "Open a configured project before running commands. Use project.list when a visual project picker helps. Use dev.run with an argv array, dev.poll for the single background process, and dev.stop to terminate it. Use question.ask when one to four concrete user decisions can be collected together.",
+        "Open a configured project before running commands. Use project.list when a visual project picker helps. Use dev.run with an argv array, dev.poll for the single background process, and dev.stop to terminate it. These command tools are intentionally non-visual. After finishing all file-changing operations for a user request, call dev.diff at most once to show one consolidated project diff. Use question.ask when one to four concrete user decisions can be collected together.",
     },
   );
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: registry.list() }));

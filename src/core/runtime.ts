@@ -3,11 +3,12 @@ import type { JsonValue, ToolCallResult } from "../types.js";
 import { realpath } from "node:fs/promises";
 
 import type { ProjectOpenHook } from "../config/types.js";
+import { beginWorkingTreeDiff, finishDiff } from "./diff.js";
 import { ProcessManager, type ProcessSnapshot } from "./process.js";
 import { listProjects, resolveProject } from "./project.js";
 
 function processData(snapshot: ProcessSnapshot): JsonValue {
-  return { ...snapshot };
+  return { ...snapshot } as unknown as JsonValue;
 }
 
 export class CoreRuntime {
@@ -76,14 +77,25 @@ export class CoreRuntime {
     }
   }
 
-  poll(): ToolCallResult {
-    const result = this.processes.poll();
+  async poll(): Promise<ToolCallResult> {
+    const result = await this.processes.poll();
     return success("dev.poll", processData(result), `state=${result.state}`);
   }
 
   async stop(): Promise<ToolCallResult> {
     const result = await this.processes.stop();
     return success("dev.stop", processData(result), `state=${result.state}`);
+  }
+
+  async diff(): Promise<ToolCallResult> {
+    if (this.activeProject === null) return failure("dev.diff", "NO_ACTIVE_PROJECT", "Open a project before viewing changes.");
+    const result = await finishDiff(await beginWorkingTreeDiff(this.activeProject));
+    return success(
+      "dev.diff",
+      { changes: result.summary } as unknown as JsonValue,
+      `${result.summary.fileCount} changed files`,
+      result.details === undefined ? undefined : { localDevDiff: result.details },
+    );
   }
 
   async close(): Promise<void> {

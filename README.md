@@ -26,7 +26,7 @@ npm start
 
 `npm run check` is the exact repository-wide check. The automated integration tests start the stdio server with temporary home directories and no credentials, browser, service, tunnel, or user configuration.
 
-The production server exposes eight native tools:
+The production server exposes nine native tools:
 
 - `project.open`
 - `project.list`
@@ -34,6 +34,7 @@ The production server exposes eight native tools:
 - `dev.run`
 - `dev.poll`
 - `dev.stop`
+- `dev.diff`
 - `question.ask`
 - `observability.recent_calls`
 
@@ -43,7 +44,8 @@ It reads the shared Codex MCP registry from `~/.codex/config.toml` without modif
 
 Local Dev includes MCP Apps widgets rendered directly in ChatGPT:
 
-- A command/process card for foreground results and the tracked background process, including bounded output, refresh/stop actions, and detected preview URLs.
+- Plain, non-visual command tools for `dev.run`, `dev.poll`, and `dev.stop`, avoiding a new widget for every internal development command.
+- One consolidated Git diff view backed by `dev.diff`, intended once after all file edits for a user request.
 - A searchable project picker backed by `project.list` and `project.open`.
 - A recent-call inspector backed by the redacted in-memory journal.
 - A structured question form for one to four agent questions, with single- or multi-select options and custom answers. Submitted answers are posted back into the conversation so the agent can continue.

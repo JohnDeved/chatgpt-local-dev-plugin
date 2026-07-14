@@ -6,17 +6,17 @@ The widgets receive tool results over `ui/notifications/tool-result`. Interactiv
 
 ## Implemented widgets
 
-### Command and process viewer
+### Consolidated diff viewer
 
-Resource: `ui://widget/local-dev-command-v1.html`
+Resource: `ui://widget/local-dev-command-v2.html`
 
-Attached to:
+Attached only to `dev.diff`. The high-frequency command tools `dev.run`, `dev.poll`, and `dev.stop` deliberately have no UI template, so internal command sequences do not create a stack of nearly identical cards in the conversation.
 
-- `dev.run`
-- `dev.poll`
-- `dev.stop`
+`dev.diff` shows the cumulative active-project worktree relative to `HEAD`. The server instructions tell the agent to call it at most once, after all file-changing operations for a user request are complete. This gives the user one consolidated changes widget instead of one widget per shell command.
 
-The widget shows the original argv, working directory, foreground/background mode, PID, state, start time, exit status, bounded output, truncation state, and detected loopback URLs. A tracked background process can be refreshed or stopped from the widget. Output can be expanded to fullscreen, and detected preview URLs can be opened through the ChatGPT host API.
+Local Dev does not compute or attach patches to individual command results. Only an explicit `dev.diff` call builds the consolidated working-tree diff, using an isolated temporary Git index. The real Git index is never staged, reset, or otherwise modified.
+
+The model-visible result contains a bounded summary: repository root, file statuses, aggregate additions/deletions, and truncation flags. Unified patches are returned in widget-only `_meta`, which the Apps SDK does not expose to the model. Text patches are capped at 64 KiB per file and 256 KiB total, with at most 50 displayed files. Binary content is not embedded. Credential-like paths such as `.env`, private keys, and credential or secret files are listed but their patch contents are hidden. Git-ignored files are not included.
 
 ### Project picker
 
