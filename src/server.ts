@@ -6,6 +6,7 @@ import { delimiter, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
+import { chromeCompatibilityEntries } from "./chrome-compat.js";
 import { loadConfiguration } from "./config/index.js";
 import { coreTools, CoreRuntime } from "./core/index.js";
 import { ProxyManager } from "./proxy.js";
@@ -28,6 +29,7 @@ export async function runServer(): Promise<void> {
   const registry = new ToolRegistry();
   registry.addAll(coreTools(runtime));
   registry.addAll(downstreamEntries);
+  registry.addAll(chromeCompatibilityEntries(downstream));
   const server = new Server(
     { name: "local-dev", version: "0.3.0" },
     {
