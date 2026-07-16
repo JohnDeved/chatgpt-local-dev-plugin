@@ -4,11 +4,14 @@ import test from "node:test";
 import { commandLabel } from "../dist/core/command-label.js";
 import { createToolProgress } from "../dist/progress.js";
 
-test("formats command labels without exposing secret-like arguments", () => {
-  assert.equal(commandLabel(["/usr/local/bin/npm", "run", "check"]), "npm run check");
+test("formats command labels with every exact argument", () => {
+  assert.equal(
+    commandLabel(["/usr/local/bin/npm", "run", "check"]),
+    "\"/usr/local/bin/npm\" \"run\" \"check\"",
+  );
   assert.equal(
     commandLabel([process.execPath, "-e", "console.log('private inline source')"]),
-    "node -e <inline code>",
+    `${JSON.stringify(process.execPath)} "-e" "console.log('private inline source')"`,
   );
   assert.equal(
     commandLabel([
@@ -18,7 +21,7 @@ test("formats command labels without exposing secret-like arguments", () => {
       "--api-key=another-private-value",
       "https://example.com/long/path",
     ]),
-    "curl --authorization •••• --api-key=•••• …",
+    "\"/usr/bin/curl\" \"--authorization\" \"Bearer private-value\" \"--api-key=another-private-value\" \"https://example.com/long/path\"",
   );
 });
 
@@ -41,8 +44,8 @@ test("creates monotonic best-effort MCP progress notifications", async () => {
   );
   assert.equal(notifications.every(({ params }) => params.total === 100), true);
   assert.equal(notifications.every(({ params }) => params.progressToken === "request-progress"), true);
-  assert.equal(notifications[0].params.message, "Starting work…");
-  assert.equal(notifications[3].params.message.length, 200);
+  assert.equal(notifications[0].params.message, " Starting   work… ");
+  assert.equal(notifications[3].params.message.length, 300);
 
   const absent = createToolProgress({}, async () => undefined);
   assert.equal(absent, undefined);

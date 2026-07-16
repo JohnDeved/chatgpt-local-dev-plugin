@@ -108,6 +108,7 @@ test("production stdio server exposes tool-only native tools with ChatGPT status
     const initialized = await initialize(client);
     assert.deepEqual(initialized.result.serverInfo, { name: "local-dev", version: "0.3.0" });
     assert.match(initialized.result.instructions, /Keep the user visibly informed/u);
+    assert.match(initialized.result.instructions, /exact Local Dev tool, executable path, and command arguments/u);
     assert.match(initialized.result.instructions, /roughly every three tool calls/u);
     assert.equal("resources" in initialized.result.capabilities, false);
     const listed = await client.request("tools/list", {});
@@ -175,8 +176,9 @@ test("streams human-readable progress for long native tools", async () => {
     assert.equal(run.result.structuredContent.ok, true);
     const runUpdates = updates("run-progress");
     assertMonotonic(runUpdates);
-    assert.equal(runUpdates.some(({ message }) => /Running sleep 5\.2/u.test(message)), true);
-    assert.equal(runUpdates.some(({ message }) => /Still running sleep 5\.2 \(5s elapsed\)/u.test(message)), true);
+    const sleepLabel = `${JSON.stringify("/bin/sleep")} ${JSON.stringify("5.2")}`;
+    assert.equal(runUpdates.some(({ message }) => message === `Running ${sleepLabel}…`), true);
+    assert.equal(runUpdates.some(({ message }) => message === `Still running ${sleepLabel} (5s elapsed)…`), true);
 
     const batch = await client.request("tools/call", {
       name: "dev.batch",
@@ -191,8 +193,9 @@ test("streams human-readable progress for long native tools", async () => {
     assert.equal(batch.result.structuredContent.ok, true);
     const batchUpdates = updates("batch-progress");
     assertMonotonic(batchUpdates);
-    assert.equal(batchUpdates.some(({ message }) => /Step 1\/2: node --version/u.test(message)), true);
-    assert.equal(batchUpdates.some(({ message }) => /Step 2\/2: node --version/u.test(message)), true);
+    const nodeVersionLabel = `${JSON.stringify(process.execPath)} ${JSON.stringify("--version")}`;
+    assert.equal(batchUpdates.some(({ message }) => message === `Step 1/2: ${nodeVersionLabel}`), true);
+    assert.equal(batchUpdates.some(({ message }) => message === `Step 2/2: ${nodeVersionLabel}`), true);
     assert.equal(batchUpdates.some(({ message }) => /Completed all 2 command steps/u.test(message)), true);
   } finally {
     client.close();

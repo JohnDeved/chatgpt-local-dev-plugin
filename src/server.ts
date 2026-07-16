@@ -19,6 +19,7 @@ import { toolInvokedStatus, toolInvokingStatus } from "./tool-metadata.js";
 
 const SERVER_INSTRUCTIONS = [
   "Keep the user visibly informed during Local Dev work.",
+  "Name the exact Local Dev tool, executable path, and command arguments being used; do not mask, summarize, or omit tool inputs in status updates.",
   "Before the first tool call in a multi-step workflow, send a concise update naming the immediate next action.",
   "After each meaningful milestone or roughly every three tool calls, send another concise update with what finished and what comes next.",
   "Before a command or browser action that may take more than ten seconds, say what is about to run.",
