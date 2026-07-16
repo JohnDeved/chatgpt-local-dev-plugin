@@ -14,8 +14,9 @@ import type {
   StdioMcpServer,
   ToolPolicy,
 } from "./types.js";
-import { isAbsolute, relative, sep } from "node:path";
+import { isAbsolute } from "node:path";
 
+import { isPathInside } from "../path.js";
 import type { JsonValue } from "../types.js";
 
 type UnknownRecord = Record<string, unknown>;
@@ -279,11 +280,6 @@ function parseInlineMedia(value: unknown, path: string): InlineMediaConfig | und
   return { roots, maxBytes: maxBytes as number, ...(tools === undefined ? {} : { tools }) };
 }
 
-function inside(root: string, candidate: string): boolean {
-  const path = relative(root, candidate);
-  return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
-}
-
 export function defaultLocalDevConfig(): LocalDevConfig {
   return { version: 1, projectRoots: [], selectedServers: [], projectOpenHooks: [], projectBindings: [] };
 }
@@ -337,7 +333,7 @@ export function parseLocalDevConfig(source: string, sourcePath = "config.json"):
     const entry = localRecord(value, `localDev.projectOpenHooks[${index}]`);
     requireKeys(entry, ["projectRoot", "argv"], `localDev.projectOpenHooks[${index}]`);
     const projectRoot = localString(entry.projectRoot, `localDev.projectOpenHooks[${index}].projectRoot`);
-    if (!isAbsolute(projectRoot) || !projectRoots.some((root) => inside(root, projectRoot)) || !Array.isArray(entry.argv) || entry.argv.length === 0) {
+    if (!isAbsolute(projectRoot) || !projectRoots.some((root) => isPathInside(root, projectRoot)) || !Array.isArray(entry.argv) || entry.argv.length === 0) {
       throw new ConfigError("INVALID_LOCAL_CONFIG", `localDev.projectOpenHooks[${index}]`, "Hook root must be inside a configured root and argv must be non-empty.");
     }
     const argv = entry.argv.map((item, argumentIndex) => localString(item, `localDev.projectOpenHooks[${index}].argv[${argumentIndex}]`));

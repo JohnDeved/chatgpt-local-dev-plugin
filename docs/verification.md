@@ -4,7 +4,7 @@ This file separates automated coverage, real-environment evidence, and evidence 
 
 ## Automated gate
 
-- [x] `npm run check` passes formatting, policy lint, strict TypeScript checking, clean build, and all 23 credential-free tests on Node 24.18.0.
+- [x] `npm run check` passes formatting, policy lint, strict TypeScript checking, clean build, and all 25 credential-free tests on Node 24.18.0.
 - [x] Temporary-home tests cover Codex/Local Dev parsing, redacted errors, strict selections, nested project hooks, core argument rejection, foreground/background execution, output bounds, stdio and Streamable HTTP proxying, pagination, filters, metadata preservation, required/optional server behavior, setup resume, rollback, service lifecycle, safe status, and uninstall preservation.
 - [x] The packed `local-dev` bin has executable mode and `npm link` produces a working command.
 

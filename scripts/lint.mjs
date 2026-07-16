@@ -1,34 +1,19 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { extname, join, relative } from "node:path";
+import { relative } from "node:path";
+
+import { collectFiles } from "./files.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const ignoredDirectories = new Set([".astro", ".git", "dist", "node_modules"]);
 const sourceExtensions = new Set([".mjs", ".ts"]);
 const violations = [];
 
-async function collect(directory) {
-  const entries = await readdir(directory, { withFileTypes: true });
-  const files = [];
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      if (!ignoredDirectories.has(entry.name)) {
-        files.push(...(await collect(join(directory, entry.name))));
-      }
-      continue;
-    }
-    if (sourceExtensions.has(extname(entry.name))) {
-      files.push(join(directory, entry.name));
-    }
-  }
-  return files;
-}
-
 function report(path, rule, detail) {
   violations.push(`${relative(root, path)}: ${rule}: ${detail}`);
 }
 
-for (const path of await collect(root)) {
+for (const path of await collectFiles(root, ignoredDirectories, sourceExtensions)) {
   const source = await readFile(path, "utf8");
   if (source.includes("\t")) {
     report(path, "no-tabs", "tabs are not allowed");

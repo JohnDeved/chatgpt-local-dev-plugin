@@ -1,9 +1,10 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 
 import type { ProjectBinding, ProjectOpenHook } from "../config/types.js";
+import { isPathInside } from "../path.js";
 import { failure, success } from "../result.js";
 import type { JsonObject, JsonValue, ToolCallResult } from "../types.js";
 import { beginWorkingTreeDiff, finishDiff } from "./diff.js";
@@ -34,16 +35,11 @@ function processData(snapshot: ProcessSnapshot): JsonValue {
   return { ...snapshot } as unknown as JsonValue;
 }
 
-function inside(root: string, candidate: string): boolean {
-  const path = relative(root, candidate);
-  return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
-}
-
 async function commandCwd(project: string, requested?: string): Promise<string> {
   if (requested === undefined) return project;
   if (isAbsolute(requested)) throw new Error("INVALID_CWD");
   const candidate = await realpath(resolve(project, requested)).catch(() => { throw new Error("INVALID_CWD"); });
-  if (!inside(project, candidate) || !(await stat(candidate)).isDirectory()) throw new Error("INVALID_CWD");
+  if (!isPathInside(project, candidate) || !(await stat(candidate)).isDirectory()) throw new Error("INVALID_CWD");
   return candidate;
 }
 
@@ -58,15 +54,14 @@ function substituted(value: JsonValue, projectPath: string): JsonValue {
 
 function resultFailure(result: CallToolResult): { failed: boolean; message?: string } {
   const text = result.content.find((block) => block.type === "text")?.text?.slice(0, 500);
-  if (result.isError === true) return { failed: true, ...(text === undefined ? {} : { message: text }) };
-  const structured = result.structuredContent;
-  if (structured !== undefined && typeof structured === "object" && structured !== null && "ok" in structured && structured.ok === false) {
-    const error = "error" in structured && typeof structured.error === "object" && structured.error !== null && "message" in structured.error
-      ? String(structured.error.message).slice(0, 500)
-      : text;
-    return { failed: true, ...(error === undefined ? {} : { message: error }) };
-  }
-  return { failed: false, ...(text === undefined ? {} : { message: text }) };
+  const structured = result.structuredContent as { ok?: unknown; error?: unknown } | undefined;
+  const failed = result.isError === true || structured?.ok === false;
+  if (!failed) return { failed: false, ...(text === undefined ? {} : { message: text }) };
+  const error = structured?.error;
+  const message = typeof error === "object" && error !== null && "message" in error
+    ? String(error.message).slice(0, 500)
+    : text;
+  return { failed: true, ...(message === undefined ? {} : { message }) };
 }
 
 function errorSnapshot(error: unknown): ProcessSnapshot | undefined {
@@ -88,22 +83,140 @@ async function createPersistentProject(query: string, roots: string[]): Promise<
   let root = realRoots[0] as string;
   let candidate: string;
   if (isAbsolute(normalized)) {
-    const matchingRoot = realRoots.find((entry) => inside(entry, normalized));
+    const matchingRoot = realRoots.find((entry) => isPathInside(entry, normalized));
     if (matchingRoot === undefined) throw new Error("INVALID_PROJECT_PATH");
     root = matchingRoot;
     candidate = normalized;
   } else {
     candidate = resolve(root, normalized);
   }
-  if (!inside(root, candidate)) throw new Error("INVALID_PROJECT_PATH");
+  if (!isPathInside(root, candidate)) throw new Error("INVALID_PROJECT_PATH");
   await mkdir(candidate, { recursive: true });
   const project = await realpath(candidate);
-  if (!inside(root, project)) throw new Error("INVALID_PROJECT_PATH");
+  if (!isPathInside(root, project)) throw new Error("INVALID_PROJECT_PATH");
   return project;
 }
 
 async function createTemporaryProject(query: string): Promise<string> {
   return await realpath(await mkdtemp(join(tmpdir(), `local-dev-${temporaryPrefix(query)}-`)));
+}
+
+
+type ProjectResolution =
+  | { target: ActiveProject; error?: never }
+  | { target?: never; error: ToolCallResult };
+
+async function resolveProjectTarget(
+  query: string,
+  onMissing: MissingProjectAction,
+  roots: string[],
+): Promise<ProjectResolution> {
+  const matches = await resolveProject(query, roots);
+  if (matches.length > 1) {
+    return {
+      error: failure(
+        "project.open",
+        "AMBIGUOUS_PROJECT",
+        `Project query matched ${matches.length} configured directories. Choose the best candidate and retry with its exact path.`,
+        { candidates: matches.map((path) => ({ name: basename(path), path })) },
+      ),
+    };
+  }
+  if (matches[0] !== undefined) return { target: { path: matches[0], kind: "existing" } };
+  if (onMissing === "error") {
+    return {
+      error: failure(
+        "project.open",
+        "PROJECT_NOT_FOUND",
+        "No configured project matched the query. Retry with onMissing=create for durable work or onMissing=temporary for disposable work.",
+      ),
+    };
+  }
+  try {
+    const temporary = onMissing === "temporary";
+    const project = temporary
+      ? await createTemporaryProject(query)
+      : await createPersistentProject(query, roots);
+    return { target: { path: project, kind: temporary ? "temporary" : "created" } };
+  } catch (error) {
+    const code = error instanceof Error ? error.message : "PROJECT_CREATE_FAILED";
+    if (code === "NO_PROJECT_ROOT") {
+      return { error: failure("project.open", code, "A persistent project cannot be created because no configured project root exists. Use a temporary project or configure a root.") };
+    }
+    if (code === "INVALID_PROJECT_PATH") {
+      return { error: failure("project.open", code, "A persistent project path must stay inside a configured project root.") };
+    }
+    return { error: failure("project.open", "PROJECT_CREATE_FAILED", "The requested project directory could not be created.") };
+  }
+}
+
+async function matchingHooks(project: string, hooks: ProjectOpenHook[]): Promise<ProjectOpenHook[]> {
+  const matches = await Promise.all(hooks.map(async (hook) =>
+    await realpath(hook.projectRoot).catch(() => undefined) === project ? hook : undefined));
+  return matches.filter((hook): hook is ProjectOpenHook => hook !== undefined);
+}
+
+async function runProjectHooks(
+  project: ActiveProject,
+  hooks: ProjectOpenHook[],
+  processes: ProcessManager,
+): Promise<ToolCallResult | undefined> {
+  for (const hook of hooks) {
+    try {
+      const result = await processes.run(hook.argv, project.path, false);
+      if (result.exitCode === 0) continue;
+      if (project.kind === "temporary") await rm(project.path, { recursive: true, force: true });
+      return failure("project.open", "PROJECT_HOOK_FAILED", "A configured project-open hook exited unsuccessfully.", processData(result));
+    } catch (error) {
+      if (project.kind === "temporary") await rm(project.path, { recursive: true, force: true });
+      const snapshot = errorSnapshot(error);
+      return failure(
+        "project.open",
+        "PROJECT_HOOK_FAILED",
+        "A configured project-open hook could not be completed.",
+        snapshot === undefined ? null : processData(snapshot),
+      );
+    }
+  }
+  return undefined;
+}
+
+async function projectBindingResults(
+  project: string,
+  bindings: ProjectBinding[],
+  invokeBinding?: ProjectBindingInvoker,
+): Promise<JsonValue[]> {
+  if (invokeBinding === undefined) {
+    return bindings.map((binding) => ({
+      server: binding.server,
+      tool: binding.tool,
+      status: "error",
+      message: "No downstream binding executor is available.",
+    }));
+  }
+  const results: JsonValue[] = [];
+  for (const binding of bindings) {
+    try {
+      const result = await invokeBinding(
+        `${binding.server}.${binding.tool}`,
+        substituted(binding.arguments, project) as JsonObject,
+      );
+      if (result === undefined) {
+        results.push({ server: binding.server, tool: binding.tool, status: "error", message: "The configured downstream tool is not exposed." });
+        continue;
+      }
+      const failed = resultFailure(result);
+      results.push({
+        server: binding.server,
+        tool: binding.tool,
+        status: failed.failed ? "error" : "ok",
+        ...(failed.message === undefined ? {} : { message: failed.message }),
+      });
+    } catch {
+      results.push({ server: binding.server, tool: binding.tool, status: "error", message: "The downstream project binding could not be completed." });
+    }
+  }
+  return results;
 }
 
 export class CoreRuntime {
@@ -122,101 +235,22 @@ export class CoreRuntime {
     if (this.processes.hasRunningBackground()) {
       return failure("project.open", "BACKGROUND_RUNNING", "Stop the background process before switching projects.");
     }
-    const matches = await resolveProject(query, this.roots);
-    if (matches.length > 1) {
-      return failure(
-        "project.open",
-        "AMBIGUOUS_PROJECT",
-        `Project query matched ${matches.length} configured directories. Choose the best candidate and retry with its exact path.`,
-        { candidates: matches.map((path) => ({ name: basename(path), path })) },
-      );
-    }
+    const resolved = await resolveProjectTarget(query, onMissing, this.roots);
+    if (resolved.error !== undefined) return resolved.error;
+    const project = resolved.target;
+    const hooks = await matchingHooks(project.path, this.projectOpenHooks);
+    const hookFailure = await runProjectHooks(project, hooks, this.processes);
+    if (hookFailure !== undefined) return hookFailure;
 
-    let project = matches[0];
-    let kind: ProjectKind = "existing";
-    if (project === undefined) {
-      if (onMissing === "error") {
-        return failure(
-          "project.open",
-          "PROJECT_NOT_FOUND",
-          "No configured project matched the query. Retry with onMissing=create for durable work or onMissing=temporary for disposable work.",
-        );
-      }
-      try {
-        project = onMissing === "create"
-          ? await createPersistentProject(query, this.roots)
-          : await createTemporaryProject(query);
-        kind = onMissing === "create" ? "created" : "temporary";
-      } catch (error) {
-        const code = error instanceof Error ? error.message : "PROJECT_CREATE_FAILED";
-        if (code === "NO_PROJECT_ROOT") {
-          return failure("project.open", code, "A persistent project cannot be created because no configured project root exists. Use a temporary project or configure a root.");
-        }
-        if (code === "INVALID_PROJECT_PATH") {
-          return failure("project.open", code, "A persistent project path must stay inside a configured project root.");
-        }
-        return failure("project.open", "PROJECT_CREATE_FAILED", "The requested project directory could not be created.");
-      }
-    }
-
-    const hooks: ProjectOpenHook[] = [];
-    for (const hook of this.projectOpenHooks) {
-      try {
-        if (await realpath(hook.projectRoot) === project) hooks.push(hook);
-      } catch {
-        // A missing configured hook root cannot match the resolved project.
-      }
-    }
-    for (const hook of hooks) {
-      try {
-        const hookResult = await this.processes.run(hook.argv, project, false);
-        if (hookResult.exitCode !== 0) {
-          if (kind === "temporary") await rm(project, { recursive: true, force: true });
-          return failure("project.open", "PROJECT_HOOK_FAILED", "A configured project-open hook exited unsuccessfully.", processData(hookResult));
-        }
-      } catch (error) {
-        if (kind === "temporary") await rm(project, { recursive: true, force: true });
-        return failure(
-          "project.open",
-          "PROJECT_HOOK_FAILED",
-          "A configured project-open hook could not be completed.",
-          errorSnapshot(error) === undefined ? null : processData(errorSnapshot(error) as ProcessSnapshot),
-        );
-      }
-    }
-
-    const bindings: JsonValue[] = [];
-    for (const binding of this.projectBindings) {
-      const exposedToolName = `${binding.server}.${binding.tool}`;
-      if (this.invokeBinding === undefined) {
-        bindings.push({ server: binding.server, tool: binding.tool, status: "error", message: "No downstream binding executor is available." });
-        continue;
-      }
-      const arguments_ = substituted(binding.arguments, project) as JsonObject;
-      try {
-        const result = await this.invokeBinding(exposedToolName, arguments_);
-        if (result === undefined) {
-          bindings.push({ server: binding.server, tool: binding.tool, status: "error", message: "The configured downstream tool is not exposed." });
-          continue;
-        }
-        const failed = resultFailure(result);
-        bindings.push({
-          server: binding.server,
-          tool: binding.tool,
-          status: failed.failed ? "error" : "ok",
-          ...(failed.message === undefined ? {} : { message: failed.message }),
-        });
-      } catch {
-        bindings.push({ server: binding.server, tool: binding.tool, status: "error", message: "The downstream project binding could not be completed." });
-      }
-    }
-    const warnings = bindings.filter((binding) => typeof binding === "object" && binding !== null && !Array.isArray(binding) && binding.status === "error").length;
-    this.activeProject = { path: project, kind };
-    if (kind === "temporary") this.temporaryProjects.add(project);
+    const bindings = await projectBindingResults(project.path, this.projectBindings, this.invokeBinding);
+    const warnings = bindings.filter((binding) =>
+      typeof binding === "object" && binding !== null && !Array.isArray(binding) && binding.status === "error").length;
+    this.activeProject = project;
+    if (project.kind === "temporary") this.temporaryProjects.add(project.path);
     return success(
       "project.open",
-      { path: project, kind, hooksRun: hooks.length, bindings, bindingWarnings: warnings },
-      `active=${project} kind=${kind}${bindings.length === 0 ? "" : ` bindings=${bindings.length - warnings}/${bindings.length}`}`,
+      { path: project.path, kind: project.kind, hooksRun: hooks.length, bindings, bindingWarnings: warnings },
+      `active=${project.path} kind=${project.kind}${bindings.length === 0 ? "" : ` bindings=${bindings.length - warnings}/${bindings.length}`}`,
     );
   }
 

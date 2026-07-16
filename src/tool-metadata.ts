@@ -26,12 +26,15 @@ function defaultInvoked(tool: Tool): string {
 
 function normalizedAnnotations(tool: Tool): Tool["annotations"] {
   const current = tool.annotations ?? {};
-  const readOnlyHint = current.readOnlyHint === true;
+  const idempotent = current.idempotentHint === undefined ? {} : { idempotentHint: current.idempotentHint };
+  if (current.readOnlyHint === true) {
+    return { readOnlyHint: true, openWorldHint: false, destructiveHint: false, ...idempotent };
+  }
   return {
-    readOnlyHint,
-    openWorldHint: readOnlyHint ? false : current.openWorldHint ?? true,
-    destructiveHint: readOnlyHint ? false : current.destructiveHint ?? true,
-    ...(current.idempotentHint === undefined ? {} : { idempotentHint: current.idempotentHint }),
+    readOnlyHint: false,
+    openWorldHint: current.openWorldHint ?? true,
+    destructiveHint: current.destructiveHint ?? true,
+    ...idempotent,
   };
 }
 

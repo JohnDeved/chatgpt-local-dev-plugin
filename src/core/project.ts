@@ -1,6 +1,8 @@
 import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
+
+import { isPathInside } from "../path.js";
 
 const IGNORED = new Set([
   ".git",
@@ -18,18 +20,13 @@ const MAX_DEPTH = 4;
 const MAX_METADATA_BYTES = 64 * 1024;
 
 
-function inside(root: string, candidate: string): boolean {
-  const path = relative(root, candidate);
-  return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
-}
-
 async function validatedDirectory(root: string, candidate: string): Promise<string | undefined> {
   try {
     const rootReal = await realpath(root);
     const info = await lstat(candidate);
     if (info.isSymbolicLink() || !info.isDirectory()) return undefined;
     const candidateReal = await realpath(candidate);
-    return inside(rootReal, candidateReal) ? candidateReal : undefined;
+    return isPathInside(rootReal, candidateReal) ? candidateReal : undefined;
   } catch {
     return undefined;
   }

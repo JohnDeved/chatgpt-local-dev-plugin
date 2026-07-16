@@ -20,7 +20,7 @@ npm run check
 | Formatting | VERIFIED | `npm run format:check` is part of `npm run check`. |
 | Policy lint | VERIFIED | Rejects prohibited runtime/network imports, stack access, stdout logging, dependency drift, and Node-range drift. |
 | Typecheck/build | VERIFIED | TypeScript `5.8.3`, ESM, Node `>=24.18.0 <25.0.0`. |
-| Unit/integration tests | VERIFIED | All 23 tests pass on Node 24.18.0 using temporary homes and spawned stdio servers without real credentials. |
+| Unit/integration tests | VERIFIED | All 25 tests pass on Node 24.18.0 using temporary homes and spawned stdio servers without real credentials. |
 | Real ChatGPT/tunnel behavior | UNVERIFIED | Must be completed below by the supervising human. |
 
 ## Checkpoint setup
