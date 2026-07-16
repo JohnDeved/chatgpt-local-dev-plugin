@@ -67,6 +67,7 @@ export interface ProjectBinding {
 export interface LocalDevConfig {
   version: 1;
   projectRoots: string[];
+  approvedBrowserOrigins: string[];
   selectedServers: SelectedServer[];
   projectOpenHooks: ProjectOpenHook[];
   projectBindings: ProjectBinding[];

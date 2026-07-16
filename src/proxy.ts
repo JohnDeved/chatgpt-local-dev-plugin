@@ -2,28 +2,39 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { CallToolResultSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolResultSchema,
+  ElicitRequestSchema,
+  type CallToolResult,
+  type ElicitRequest,
+  type ElicitResult,
+  type Tool,
+} from "@modelcontextprotocol/sdk/types.js";
 
 import type { HttpMcpServer, ResolvedSelectedServer, StdioMcpServer } from "./config/types.js";
 import { inlineLocalMedia } from "./media.js";
 import { failure } from "./result.js";
 import type { RegistryEntry } from "./registry.js";
 import { prepareProxiedTool } from "./tool-metadata.js";
+import { prepareStdioLaunch } from "./trusted-runtime.js";
 
 interface Connection {
   client: Client;
   entries: RegistryEntry[];
 }
 
+type ElicitInput = (params: ElicitRequest["params"]) => Promise<ElicitResult>;
+
 function stdioTransport(server: StdioMcpServer): StdioClientTransport {
+  const launch = prepareStdioLaunch(server);
   const env = { ...getDefaultEnvironment(), ...server.env };
   for (const { name } of server.envVars) {
     const value = process.env[name];
     if (value !== undefined) env[name] = value;
   }
   const transport = new StdioClientTransport({
-    command: server.command,
-    args: server.args,
+    command: launch.command,
+    args: launch.args,
     env,
     stderr: "pipe",
     ...(server.cwd === undefined ? {} : { cwd: server.cwd }),
@@ -64,9 +75,15 @@ async function discover(client: Client, timeout: number): Promise<Tool[]> {
   return tools;
 }
 
-async function connectSelected(selection: ResolvedSelectedServer): Promise<Connection> {
+async function connectSelected(selection: ResolvedSelectedServer, elicitInput: ElicitInput | undefined): Promise<Connection> {
   const { alias, inlineMedia, server } = selection;
-  const client = new Client({ name: `local-dev-${alias}`, version: "0.3.0" });
+  const client = new Client(
+    { name: `local-dev-${alias}`, version: "0.3.0" },
+    elicitInput === undefined ? undefined : { capabilities: { elicitation: { form: {} } } },
+  );
+  if (elicitInput !== undefined) {
+    client.setRequestHandler(ElicitRequestSchema, async ({ params }) => await elicitInput(params));
+  }
   const transport = server.transport === "stdio" ? stdioTransport(server) : httpTransport(server);
   let tools: Tool[];
   try {
@@ -103,11 +120,13 @@ async function connectSelected(selection: ResolvedSelectedServer): Promise<Conne
 export class ProxyManager {
   private readonly connections: Connection[] = [];
 
+  constructor(private readonly elicitInput?: ElicitInput) {}
+
   async connect(selections: ResolvedSelectedServer[]): Promise<RegistryEntry[]> {
     const entries: RegistryEntry[] = [];
     for (const selection of selections) {
       try {
-        const connection = await connectSelected(selection);
+        const connection = await connectSelected(selection, this.elicitInput);
         this.connections.push(connection);
         entries.push(...connection.entries);
       } catch {

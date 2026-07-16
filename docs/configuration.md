@@ -10,17 +10,10 @@ Local Dev uses this versioned shape:
 {
   "version": 1,
   "projectRoots": ["/absolute/project/root"],
+  "approvedBrowserOrigins": ["https://chatgpt.com"],
   "selectedServers": [
     { "id": "serena", "alias": "code" },
-    {
-      "id": "chrome-devtools",
-      "alias": "chrome",
-      "inlineMedia": {
-        "roots": ["/tmp"],
-        "maxBytes": 5242880,
-        "tools": ["screenshot"]
-      }
-    }
+    { "id": "node_repl", "alias": "chrome" }
   ],
   "projectOpenHooks": [
     { "projectRoot": "/absolute/project/root", "argv": ["npm", "install"] }
@@ -37,6 +30,8 @@ Local Dev uses this versioned shape:
 
 Project roots must be absolute and unique. `project.open` matches directories by folder name, `package.json` name, or Git remote repository name, so renamed worktrees can still be opened by their canonical project name. Metadata reads are local and bounded. Server ids and aliases must be unique. Hooks use argument arrays only; shell strings are rejected. Local Dev rejects unknown fields to catch misspellings.
 
+`approvedBrowserOrigins` is an optional exact-match allowlist for empty Browser Use `access_browser_origin` form approvals. Entries must be unique HTTP or HTTPS origins without paths. Local Dev accepts only that narrow origin-access request for a configured origin; requests with form fields, other browser tools, or other origins still flow to the upstream client for confirmation.
+
 `projectBindings` synchronizes project-aware downstream MCP servers after Local Dev opens a project. Each binding references a selected server alias and an original downstream tool name. Its JSON-object arguments may contain `${projectPath}` anywhere in string values; Local Dev substitutes the resolved active-project path recursively, invokes the exposed `<server>.<tool>`, and returns bounded per-binding status and warnings in the `project.open` result. Bindings are generic configuration, not server-specific adapters. Missing or failing binding tools do not prevent Local Dev from opening the project.
 
 `inlineMedia` is an explicit per-server opt-in for MCP tools that return an absolute local media path as text instead of a native media content block. Local Dev preserves the text result, appends a canonical MCP `image` or `audio` block, and adds a compact media-count `structuredContent` value when the downstream result has none. A file is included only when it resolves inside an allowlisted absolute root, matches a supported media signature, and does not exceed `maxBytes` (5 MiB by default, 25 MiB maximum). Native MCP media blocks pass through unchanged. Use the optional non-empty `tools` list to scope conversion to specific original downstream tool names; omitting it enables all tools on that selected server. Embedded-UI metadata from downstream tools is stripped. Keep roots narrow; `/tmp` covers Chrome DevTools MCP screenshots on macOS.
@@ -44,5 +39,7 @@ Project roots must be absolute and unique. `project.open` matches directories by
 An HTTP server explicitly configured with `auth = "oauth"` or `auth = "chatgpt"` is skipped when it has no independently reusable bearer or header credential configuration. A required selected server in that state fails loading. Credential values are never included in configuration error messages.
 
 At startup, Local Dev connects only explicitly selected servers. It follows every `tools/list` page, applies `enabled_tools` and `disabled_tools`, and exposes retained tools as `<alias>.<tool>`. Input/output schemas, descriptions, titles, annotations, metadata, and native MCP media content are preserved. Stdio child environments use the SDK's safe defaults plus configured values; HTTP bearer and environment-backed headers are resolved only when connecting and are never returned in tool errors.
+
+When the selected server id is `node_repl` and its configured command is the bundled `node_repl` executable, Local Dev transparently launches it beneath two sibling OpenAI-signed Node processes. This preserves MCP stdio while satisfying the packaged Chrome extension bridge's native-pipe ancestry check. Codex configuration can remain in its app-generated direct form, and already wrapped or unrelated stdio servers are left unchanged.
 
 A selected server with `required = true` fails startup when it cannot connect or complete discovery. An unavailable optional server is omitted from that static tool list. If a discovered server later becomes unavailable, calls return the stable `DOWNSTREAM_UNAVAILABLE` error without a raw stack trace or credential detail. Restart Local Dev and refresh the ChatGPT plugin after changing the shared registry or selections.

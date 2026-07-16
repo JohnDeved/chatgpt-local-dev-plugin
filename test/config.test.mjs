@@ -75,6 +75,7 @@ test("parses strict Local Dev selections, roots, and argv hooks", () => {
   const config = parseLocalDevConfig(JSON.stringify({
     version: 1,
     projectRoots: ["/work"],
+    approvedBrowserOrigins: ["https://chatgpt.com"],
     selectedServers: [{
       id: "local",
       alias: "code",
@@ -83,6 +84,7 @@ test("parses strict Local Dev selections, roots, and argv hooks", () => {
     projectOpenHooks: [{ projectRoot: "/work/project", argv: ["npm", "install"] }],
     projectBindings: [{ server: "code", tool: "activate_project", arguments: { project: "${projectPath}", nested: [1, true] } }],
   }));
+  assert.deepEqual(config.approvedBrowserOrigins, ["https://chatgpt.com"]);
   assert.deepEqual(config.selectedServers, [{
     id: "local",
     alias: "code",
@@ -103,6 +105,8 @@ test("rejects relative roots, duplicate aliases, unknown fields, and shell strin
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, selectedServers: [{ id: "a", alias: "a", inlineMedia: { roots: ["relative"] } }] })), ConfigError);
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, selectedServers: [{ id: "a", alias: "a", inlineMedia: { roots: ["/tmp"], maxBytes: 30 * 1024 * 1024 } }] })), ConfigError);
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, selectedServers: [{ id: "a", alias: "a", inlineMedia: { roots: ["/tmp"], tools: [] } }] })), ConfigError);
+  assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, approvedBrowserOrigins: ["https://chatgpt.com/path"] })), ConfigError);
+  assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, approvedBrowserOrigins: ["https://chatgpt.com", "https://chatgpt.com"] })), ConfigError);
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, surprise: true })), ConfigError);
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, projectOpenHooks: [{ projectRoot: "/work", argv: "npm install" }] })), ConfigError);
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, projectOpenHooks: [{ projectRoot: "/outside", argv: ["npm", "install"] }] })), ConfigError);

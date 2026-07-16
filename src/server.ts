@@ -9,15 +9,31 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { chromeCompatibilityEntries } from "./chrome-compat.js";
 import { loadConfiguration } from "./config/index.js";
 import { coreTools, CoreRuntime } from "./core/index.js";
+import { resolveElicitation } from "./elicitation.js";
 import { ProxyManager } from "./proxy.js";
 import { failure } from "./result.js";
+import { requestMetadataForTool } from "./request-meta.js";
 import { ToolRegistry } from "./registry.js";
 
 export async function runServer(): Promise<void> {
   const nodeBin = dirname(process.execPath);
   process.env.PATH = process.env.PATH ? `${nodeBin}${delimiter}${process.env.PATH}` : nodeBin;
   const configuration = await loadConfiguration();
-  const proxy = new ProxyManager();
+  const server = new Server(
+    { name: "local-dev", version: "0.3.0" },
+    {
+      capabilities: { tools: {} },
+      instructions:
+        "Resolve a project automatically before running local commands. Infer an existing project name or path from the user's request and call project.open. If no existing project fits, choose onMissing=create for durable work or onMissing=temporary for disposable experiments; temporary projects are deleted when the Local Dev runtime closes. Never ask the user to choose from a project picker. If project.open returns ambiguous candidates, select the best candidate from the request and retry with its exact path. Project activation synchronizes configured downstream project bindings. Prefer downstream semantic code tools for navigation and precise edits. Use dev.run for one direct argv command or dev.batch for bounded sequential commands; never invoke a shell with evaluation flags. Use relative cwd for monorepo subdirectories, dev.poll for the single background process, and dev.stop to terminate it. After all file-changing operations for a user request, run the repository check and call dev.diff at most once.",
+    },
+  );
+  const proxy = new ProxyManager(async (params) =>
+    await resolveElicitation(
+      params,
+      configuration.localDev.approvedBrowserOrigins,
+      async (request) => await server.elicitInput(request),
+    )
+  );
   const downstreamEntries = await proxy.connect(configuration.selectedServers);
   const downstream = new Map(downstreamEntries.map((entry) => [entry.tool.name, entry]));
   const runtime = new CoreRuntime(
@@ -30,19 +46,17 @@ export async function runServer(): Promise<void> {
   registry.addAll(coreTools(runtime));
   registry.addAll(downstreamEntries);
   registry.addAll(chromeCompatibilityEntries(downstream));
-  const server = new Server(
-    { name: "local-dev", version: "0.3.0" },
-    {
-      capabilities: { tools: {} },
-      instructions:
-        "Resolve a project automatically before running local commands. Infer an existing project name or path from the user's request and call project.open. If no existing project fits, choose onMissing=create for durable work or onMissing=temporary for disposable experiments; temporary projects are deleted when the Local Dev runtime closes. Never ask the user to choose from a project picker. If project.open returns ambiguous candidates, select the best candidate from the request and retry with its exact path. Project activation synchronizes configured downstream project bindings. Prefer downstream semantic code tools for navigation and precise edits. Use dev.run for one direct argv command or dev.batch for bounded sequential commands; never invoke a shell with evaluation flags. Use relative cwd for monorepo subdirectories, dev.poll for the single background process, and dev.stop to terminate it. After all file-changing operations for a user request, run the repository check and call dev.diff at most once.",
-    },
-  );
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: registry.list() }));
-  server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
+  server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
     const entry = registry.get(params.name);
     if (entry === undefined) return failure(params.name, "UNKNOWN_TOOL", "The requested tool is not registered.") as never;
-    return await entry.call(params.arguments ?? {}, params._meta);
+    const metadata = requestMetadataForTool(
+      params.name,
+      params._meta ?? extra._meta,
+      extra.sessionId,
+      extra.requestId,
+    );
+    return await entry.call(params.arguments ?? {}, metadata);
   });
   const transport = new StdioServerTransport();
 

@@ -237,6 +237,20 @@ function localString(value: unknown, path: string): string {
   return value;
 }
 
+function browserOrigin(value: unknown, path: string): string {
+  const origin = localString(value, path);
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw new ConfigError("INVALID_LOCAL_CONFIG", path, `${path} must be an HTTP or HTTPS origin.`);
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.origin !== origin) {
+    throw new ConfigError("INVALID_LOCAL_CONFIG", path, `${path} must be an HTTP or HTTPS origin without a path.`);
+  }
+  return origin;
+}
+
 function localJsonValue(value: unknown, path: string, depth = 0): JsonValue {
   if (depth > 12) throw new ConfigError("INVALID_LOCAL_CONFIG", path, `${path} exceeds the supported nesting depth.`);
   if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") return value;
@@ -281,7 +295,14 @@ function parseInlineMedia(value: unknown, path: string): InlineMediaConfig | und
 }
 
 export function defaultLocalDevConfig(): LocalDevConfig {
-  return { version: 1, projectRoots: [], selectedServers: [], projectOpenHooks: [], projectBindings: [] };
+  return {
+    version: 1,
+    projectRoots: [],
+    approvedBrowserOrigins: [],
+    selectedServers: [],
+    projectOpenHooks: [],
+    projectBindings: [],
+  };
 }
 
 export function parseLocalDevConfig(source: string, sourcePath = "config.json"): LocalDevConfig {
@@ -292,7 +313,11 @@ export function parseLocalDevConfig(source: string, sourcePath = "config.json"):
     throw new ConfigError("INVALID_LOCAL_CONFIG", sourcePath, `Could not parse ${sourcePath}.`);
   }
   const input = localRecord(raw, "localDev");
-  requireKeys(input, ["version", "projectRoots", "selectedServers", "projectOpenHooks", "projectBindings"], "localDev");
+  requireKeys(
+    input,
+    ["version", "projectRoots", "approvedBrowserOrigins", "selectedServers", "projectOpenHooks", "projectBindings"],
+    "localDev",
+  );
   if (input.version !== 1) {
     throw new ConfigError("INVALID_LOCAL_CONFIG", "localDev.version", "localDev.version must be 1.");
   }
@@ -308,6 +333,24 @@ export function parseLocalDevConfig(source: string, sourcePath = "config.json"):
   });
   if (new Set(projectRoots).size !== projectRoots.length) {
     throw new ConfigError("INVALID_LOCAL_CONFIG", "localDev.projectRoots", "Project roots must be unique.");
+  }
+  const rawApprovedBrowserOrigins = input.approvedBrowserOrigins ?? [];
+  if (!Array.isArray(rawApprovedBrowserOrigins)) {
+    throw new ConfigError(
+      "INVALID_LOCAL_CONFIG",
+      "localDev.approvedBrowserOrigins",
+      "localDev.approvedBrowserOrigins must be an array.",
+    );
+  }
+  const approvedBrowserOrigins = rawApprovedBrowserOrigins.map((value, index) =>
+    browserOrigin(value, `localDev.approvedBrowserOrigins[${index}]`)
+  );
+  if (new Set(approvedBrowserOrigins).size !== approvedBrowserOrigins.length) {
+    throw new ConfigError(
+      "INVALID_LOCAL_CONFIG",
+      "localDev.approvedBrowserOrigins",
+      "Approved browser origins must be unique.",
+    );
   }
   if (!Array.isArray(input.selectedServers)) {
     throw new ConfigError("INVALID_LOCAL_CONFIG", "localDev.selectedServers", "localDev.selectedServers must be an array.");
@@ -362,5 +405,12 @@ export function parseLocalDevConfig(source: string, sourcePath = "config.json"):
     }
     return { server, tool, arguments: arguments_ };
   });
-  return { version: 1, projectRoots, selectedServers, projectOpenHooks, projectBindings };
+  return {
+    version: 1,
+    projectRoots,
+    approvedBrowserOrigins,
+    selectedServers,
+    projectOpenHooks,
+    projectBindings,
+  };
 }
