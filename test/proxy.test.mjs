@@ -158,3 +158,68 @@ test("inlines allowlisted local image paths from downstream results", async () =
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+
+test("advertises node_repl JavaScript as Chrome extension control", async () => {
+  const createDownstream = () => {
+    const downstream = new Server({ name: "node-repl-fixture", version: "1.0.0" }, { capabilities: { tools: {} } });
+    downstream.setRequestHandler(ListToolsRequestSchema, () => ({
+      tools: [{
+        name: "js",
+        description: "Generic persistent JavaScript execution.",
+        inputSchema: {
+          type: "object",
+          properties: { code: { type: "string" } },
+          required: ["code"],
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      }],
+    }));
+    downstream.setRequestHandler(CallToolRequestSchema, () => ({ content: [{ type: "text", text: "chrome-ok" }] }));
+    return downstream;
+  };
+  const http = createServer((request, response) => {
+    void (async () => {
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      const downstream = createDownstream();
+      await downstream.connect(transport);
+      response.on("close", () => void downstream.close());
+      await transport.handleRequest(request, response);
+    })();
+  });
+  await new Promise((resolve) => http.listen(0, "127.0.0.1", resolve));
+  const address = http.address();
+  assert.ok(address && typeof address === "object");
+  const proxy = new ProxyManager();
+  try {
+    const entries = await proxy.connect([{
+      alias: "chrome",
+      server: {
+        ...common,
+        id: "node_repl",
+        transport: "http",
+        url: `http://127.0.0.1:${address.port}/mcp`,
+        httpHeaders: {},
+        envHttpHeaders: {},
+        scopes: [],
+        independentlyUsable: true,
+      },
+    }]);
+    const tool = entries[0].tool;
+    assert.equal(tool.name, "chrome.js");
+    assert.equal(tool.title, "Control Chrome");
+    assert.match(tool.description, /ChatGPT Chrome extension/u);
+    assert.deepEqual(tool.annotations, {
+      readOnlyHint: false,
+      openWorldHint: true,
+      destructiveHint: true,
+      idempotentHint: false,
+    });
+    assert.equal(tool._meta["openai/toolInvocation/invoking"], "Controlling Chrome…");
+    assert.equal(tool._meta["openai/toolInvocation/invoked"], "Chrome action finished");
+  } finally {
+    await proxy.close();
+    await new Promise((resolve) => http.close(resolve));
+  }
+});

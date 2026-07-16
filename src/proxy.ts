@@ -82,7 +82,7 @@ async function connectSelected(selection: ResolvedSelectedServer): Promise<Conne
       ? inlineMedia
       : undefined;
     return {
-      tool: prepareProxiedTool({ ...tool, name: exposedName }),
+      tool: prepareProxiedTool({ ...tool, name: exposedName }, { serverId: server.id, alias, sourceName: tool.name }),
       call: async (arguments_) => {
         try {
           const result = await client.callTool(
