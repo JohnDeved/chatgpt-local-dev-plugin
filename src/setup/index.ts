@@ -33,9 +33,9 @@ function quoteArgument(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function mcpCommand(): { command: string; cliPath: string } {
-  const cliPath = fileURLToPath(new URL("../cli.js", import.meta.url));
-  return { command: [process.execPath, cliPath].map(quoteArgument).join(" "), cliPath };
+function mcpCommand(): { command: string; serverPath: string } {
+  const serverPath = fileURLToPath(new URL("../server.js", import.meta.url));
+  return { command: [process.execPath, serverPath].map(quoteArgument).join(" "), serverPath };
 }
 
 async function executable(path: string): Promise<boolean> {
@@ -209,6 +209,7 @@ export async function runSetup(
     projectRoots: roots,
     selectedServers: selections,
     projectOpenHooks: existingLocal?.projectOpenHooks.filter(({ projectRoot }) => hookInsideRoots(projectRoot, roots)) ?? [],
+    projectBindings: existingLocal?.projectBindings.filter(({ server }) => selections.some(({ alias }) => alias === server)) ?? [],
   };
   parseLocalDevConfig(localConfigSource(configuration), paths.localConfig);
   reporter.line(`[ ] configure project roots: ${roots.join(", ")}`);
@@ -226,8 +227,8 @@ export async function runSetup(
     localBackup = await writeAtomic(paths.localConfig, localConfigSource(configuration));
     reporter.line("[✓] configuration written atomically; prior files were backed up");
 
-    const { command, cliPath } = mcpCommand();
-    await smokeServer(home, process.execPath, cliPath);
+    const { command, serverPath } = mcpCommand();
+    await smokeServer(home, process.execPath, serverPath);
     reporter.line("[✓] local MCP smoke test passed");
 
     const alias = options.alias ?? previous?.alias ?? "local-dev";
@@ -322,7 +323,7 @@ export async function readSetupStatus(home = setupPaths().home): Promise<{
   let smokeReady = true;
   try {
     const current = mcpCommand();
-    await smokeServer(home, process.execPath, current.cliPath);
+    await smokeServer(home, process.execPath, current.serverPath);
   } catch {
     smokeReady = false;
     fixes.push("The local MCP server smoke test failed; rerun local-dev setup after checking configuration.");
@@ -348,4 +349,4 @@ export async function uninstall(home = setupPaths().home): Promise<void> {
 }
 
 export { setupPaths } from "./paths.js";
-export type { SetupOptions, SetupResult, SetupState } from "./types.js";
+export type { SetupOptions, SetupResult } from "./types.js";

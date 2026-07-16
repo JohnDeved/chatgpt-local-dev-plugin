@@ -8,12 +8,15 @@ import type {
   LocalDevConfig,
   McpServer,
   McpServerCommon,
+  ProjectBinding,
   ProjectOpenHook,
   SelectedServer,
   StdioMcpServer,
   ToolPolicy,
 } from "./types.js";
 import { isAbsolute, relative, sep } from "node:path";
+
+import type { JsonValue } from "../types.js";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -233,6 +236,17 @@ function localString(value: unknown, path: string): string {
   return value;
 }
 
+function localJsonValue(value: unknown, path: string, depth = 0): JsonValue {
+  if (depth > 12) throw new ConfigError("INVALID_LOCAL_CONFIG", path, `${path} exceeds the supported nesting depth.`);
+  if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map((item, index) => localJsonValue(item, `${path}[${index}]`, depth + 1));
+  if (typeof value !== "object") throw new ConfigError("INVALID_LOCAL_CONFIG", path, `${path} must contain only JSON values.`);
+  return Object.fromEntries(Object.entries(value as UnknownRecord).map(([key, item]) => [
+    key,
+    localJsonValue(item, `${path}.${key}`, depth + 1),
+  ]));
+}
+
 function parseInlineMedia(value: unknown, path: string): InlineMediaConfig | undefined {
   if (value === undefined) return undefined;
   const input = localRecord(value, path);
@@ -271,7 +285,7 @@ function inside(root: string, candidate: string): boolean {
 }
 
 export function defaultLocalDevConfig(): LocalDevConfig {
-  return { version: 1, projectRoots: [], selectedServers: [], projectOpenHooks: [] };
+  return { version: 1, projectRoots: [], selectedServers: [], projectOpenHooks: [], projectBindings: [] };
 }
 
 export function parseLocalDevConfig(source: string, sourcePath = "config.json"): LocalDevConfig {
@@ -282,7 +296,7 @@ export function parseLocalDevConfig(source: string, sourcePath = "config.json"):
     throw new ConfigError("INVALID_LOCAL_CONFIG", sourcePath, `Could not parse ${sourcePath}.`);
   }
   const input = localRecord(raw, "localDev");
-  requireKeys(input, ["version", "projectRoots", "selectedServers", "projectOpenHooks"], "localDev");
+  requireKeys(input, ["version", "projectRoots", "selectedServers", "projectOpenHooks", "projectBindings"], "localDev");
   if (input.version !== 1) {
     throw new ConfigError("INVALID_LOCAL_CONFIG", "localDev.version", "localDev.version must be 1.");
   }
@@ -329,5 +343,28 @@ export function parseLocalDevConfig(source: string, sourcePath = "config.json"):
     const argv = entry.argv.map((item, argumentIndex) => localString(item, `localDev.projectOpenHooks[${index}].argv[${argumentIndex}]`));
     return { projectRoot, argv };
   });
-  return { version: 1, projectRoots, selectedServers, projectOpenHooks };
+  const rawBindings = input.projectBindings ?? [];
+  if (!Array.isArray(rawBindings)) {
+    throw new ConfigError("INVALID_LOCAL_CONFIG", "localDev.projectBindings", "localDev.projectBindings must be an array.");
+  }
+  const selectedAliases = new Set(selectedServers.map(({ alias }) => alias));
+  const projectBindings: ProjectBinding[] = rawBindings.map((value, index) => {
+    const path = `localDev.projectBindings[${index}]`;
+    const entry = localRecord(value, path);
+    requireKeys(entry, ["server", "tool", "arguments"], path);
+    const server = localString(entry.server, `${path}.server`);
+    const tool = localString(entry.tool, `${path}.tool`);
+    if (!ALIAS.test(server) || !selectedAliases.has(server)) {
+      throw new ConfigError("INVALID_LOCAL_CONFIG", `${path}.server`, "Binding server must be a selected server alias.");
+    }
+    if (tool.length > 256) {
+      throw new ConfigError("INVALID_LOCAL_CONFIG", `${path}.tool`, "Binding tool must be no longer than 256 characters.");
+    }
+    const arguments_ = entry.arguments === undefined ? {} : localJsonValue(entry.arguments, `${path}.arguments`);
+    if (typeof arguments_ !== "object" || arguments_ === null || Array.isArray(arguments_)) {
+      throw new ConfigError("INVALID_LOCAL_CONFIG", `${path}.arguments`, "Binding arguments must be a JSON object.");
+    }
+    return { server, tool, arguments: arguments_ };
+  });
+  return { version: 1, projectRoots, selectedServers, projectOpenHooks, projectBindings };
 }

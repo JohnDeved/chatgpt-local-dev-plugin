@@ -1,10 +1,5 @@
 import type { JsonValue, StructuredResult, ToolCallResult } from "./types.js";
 
-function compactValue(value: JsonValue): string {
-  const serialized = JSON.stringify(value);
-  return serialized.length <= 160 ? serialized : `${serialized.slice(0, 157)}...`;
-}
-
 export function success(
   tool: string,
   data: JsonValue,
@@ -29,11 +24,13 @@ export function failure(
   tool: string,
   code: string,
   message: string,
+  data: JsonValue = null,
+  metadata?: Record<string, unknown>,
 ): ToolCallResult {
   const structuredContent: StructuredResult = {
     ok: false,
     tool,
-    data: null,
+    data,
     error: { code, message },
   };
 
@@ -41,9 +38,6 @@ export function failure(
     structuredContent,
     content: [{ type: "text", text: `${tool} error ${code}: ${message}` }],
     isError: true,
+    ...(metadata === undefined ? {} : { _meta: metadata }),
   };
-}
-
-export function summarizeEcho(value: JsonValue): string {
-  return `echo=${compactValue(value)}`;
 }

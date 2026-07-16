@@ -40,6 +40,7 @@ for (const path of await collect(root)) {
   if (relative(root, path).startsWith("src/")) {
     const prohibitedModules = [
       "node:dgram",
+      "node:http",
       "node:https",
       "node:net",
       "node:tls",
@@ -49,18 +50,6 @@ for (const path of await collect(root)) {
       if (source.includes(`\"${moduleName}\"`) || source.includes(`'${moduleName}'`)) {
         report(path, "no-prohibited-runtime", `import of ${moduleName}`);
       }
-    }
-    if (
-      source.includes('"node:http"') &&
-      relative(root, path) !== "src/dashboard.ts"
-    ) {
-      report(path, "http-boundary", "node:http is restricted to the loopback dashboard");
-    }
-    if (
-      relative(root, path) === "src/dashboard.ts" &&
-      (!source.includes('server.listen(0, "127.0.0.1"') || !source.includes("randomBytes(24)"))
-    ) {
-      report(path, "loopback-dashboard", "dashboard must bind an ephemeral loopback port behind a random URL token");
     }
     if (
       source.includes('"node:child_process"') &&
@@ -92,12 +81,12 @@ const expectedDependencies = {
 if (JSON.stringify(packageJson.dependencies) !== JSON.stringify(expectedDependencies)) {
   violations.push("package.json: runtime-dependencies: dependency set or exact versions changed");
 }
-const expectedDevDependencies = { "@types/node": "22.20.1", typescript: "5.8.3" };
+const expectedDevDependencies = { "@types/node": "24.13.3", typescript: "5.8.3" };
 if (JSON.stringify(packageJson.devDependencies) !== JSON.stringify(expectedDevDependencies)) {
   violations.push("package.json: dev-dependencies: dependency set or exact versions changed");
 }
-if (packageJson.engines?.node !== ">=22.16.0 <23.0.0") {
-  violations.push("package.json: node-range: expected >=22.16.0 <23.0.0");
+if (packageJson.engines?.node !== ">=24.18.0 <25.0.0") {
+  violations.push("package.json: node-range: expected >=24.18.0 <25.0.0");
 }
 
 if (violations.length > 0) {

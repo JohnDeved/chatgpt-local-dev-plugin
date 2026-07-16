@@ -25,15 +25,24 @@ server.setRequestHandler(ListToolsRequestSchema, ({ params }) => {
     };
   }
   return {
-    tools: [{
-      name: "echo",
-      title: "Downstream echo",
-      description: "Echo through the generic proxy.",
-      inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
-      outputSchema: { type: "object", properties: { echoed: { type: "string" } }, required: ["echoed"] },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      _meta: { fixture: true, ui: { resourceUri: WIDGET_URI }, "openai/outputTemplate": WIDGET_URI },
-    }],
+    tools: [
+      {
+        name: "echo",
+        title: "Downstream echo",
+        description: "Echo through the generic proxy.",
+        inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
+        outputSchema: { type: "object", properties: { echoed: { type: "string" } }, required: ["echoed"] },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        _meta: { fixture: true, ui: { resourceUri: WIDGET_URI }, "openai/outputTemplate": WIDGET_URI },
+      },
+      {
+        name: "activate_project",
+        title: "Activate downstream project",
+        description: "Fixture project binding target.",
+        inputSchema: { type: "object", properties: { project: { type: "string" } }, required: ["project"], additionalProperties: false },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+    ],
     nextCursor: "page-2",
   };
 });
@@ -54,9 +63,17 @@ server.setRequestHandler(ReadResourceRequestSchema, ({ params }) => {
   };
 });
 
-server.setRequestHandler(CallToolRequestSchema, ({ params }) => ({
-  content: [{ type: "text", text: `echo=${String(params.arguments?.value)}` }],
-  structuredContent: { echoed: params.arguments?.value },
-}));
+server.setRequestHandler(CallToolRequestSchema, ({ params }) => {
+  if (params.name === "activate_project") {
+    return {
+      content: [{ type: "text", text: `active=${String(params.arguments?.project)}` }],
+      structuredContent: { activeProject: params.arguments?.project },
+    };
+  }
+  return {
+    content: [{ type: "text", text: `echo=${String(params.arguments?.value)}` }],
+    structuredContent: { echoed: params.arguments?.value },
+  };
+});
 
 await server.connect(new StdioServerTransport());

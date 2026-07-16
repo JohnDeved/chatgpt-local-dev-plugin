@@ -81,6 +81,7 @@ test("parses strict Local Dev selections, roots, and argv hooks", () => {
       inlineMedia: { roots: ["/tmp"], maxBytes: 1024, tools: ["screenshot"] },
     }],
     projectOpenHooks: [{ projectRoot: "/work/project", argv: ["npm", "install"] }],
+    projectBindings: [{ server: "code", tool: "activate_project", arguments: { project: "${projectPath}", nested: [1, true] } }],
   }));
   assert.deepEqual(config.selectedServers, [{
     id: "local",
@@ -88,6 +89,11 @@ test("parses strict Local Dev selections, roots, and argv hooks", () => {
     inlineMedia: { roots: ["/tmp"], maxBytes: 1024, tools: ["screenshot"] },
   }]);
   assert.deepEqual(config.projectOpenHooks[0].argv, ["npm", "install"]);
+  assert.deepEqual(config.projectBindings, [{
+    server: "code",
+    tool: "activate_project",
+    arguments: { project: "${projectPath}", nested: [1, true] },
+  }]);
 });
 
 test("rejects relative roots, duplicate aliases, unknown fields, and shell strings", () => {
@@ -100,6 +106,8 @@ test("rejects relative roots, duplicate aliases, unknown fields, and shell strin
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, surprise: true })), ConfigError);
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, projectOpenHooks: [{ projectRoot: "/work", argv: "npm install" }] })), ConfigError);
   assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, projectOpenHooks: [{ projectRoot: "/outside", argv: ["npm", "install"] }] })), ConfigError);
+  assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, projectBindings: [{ server: "missing", tool: "activate", arguments: {} }] })), ConfigError);
+  assert.throws(() => parseLocalDevConfig(JSON.stringify({ ...base, selectedServers: [{ id: "a", alias: "a" }], projectBindings: [{ server: "a", tool: "activate", arguments: [] }] })), ConfigError);
 });
 
 test("loads from a temporary home and resolves only explicitly selected usable servers", async () => {

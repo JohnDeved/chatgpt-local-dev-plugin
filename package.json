@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-local-dev-plugin",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Private local-development MCP server for ChatGPT through OpenAI Secure MCP Tunnel.",
   "type": "module",
@@ -8,17 +8,18 @@
     "local-dev": "dist/cli.js"
   },
   "engines": {
-    "node": ">=22.16.0 <23.0.0"
+    "node": ">=24.18.0 <25.0.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/make-bin-executable.mjs",
+    "build": "npm run clean && tsc -p tsconfig.json && node scripts/make-bin-executable.mjs",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm test",
     "format": "node scripts/format.mjs",
     "format:check": "node scripts/format.mjs --check",
     "lint": "node scripts/lint.mjs",
     "start": "node dist/cli.js",
     "test": "node --test test/*.test.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "node scripts/clean.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
@@ -26,7 +27,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/node": "22.20.1",
+    "@types/node": "24.13.3",
     "typescript": "5.8.3"
   },
   "license": "UNLICENSED"

@@ -13,7 +13,7 @@ The owner explicitly waived the unfinished long-running compatibility rows after
 
 ## Core server
 
-The package targets macOS with Node `22.16.0`.
+The package targets macOS with Node `24.18.0`.
 
 ```sh
 nvm install
@@ -26,44 +26,25 @@ npm start
 
 `npm run check` is the exact repository-wide check. The automated integration tests start the stdio server with temporary home directories and no credentials, browser, service, tunnel, or user configuration.
 
-The production server exposes nine native tools:
+The production server exposes seven native tools:
 
 - `project.open`
-- `project.list`
 - `project.current`
 - `dev.run`
+- `dev.batch`
 - `dev.poll`
 - `dev.stop`
 - `dev.diff`
-- `question.ask`
-- `observability.recent_calls`
 
-It reads the shared Codex MCP registry from `~/.codex/config.toml` without modifying it. Local-only project roots, selected downstream server aliases, optional allowlisted local-media inlining, and argv-based project hooks live in `~/.local-dev/config.json`; see [`docs/configuration.md`](./docs/configuration.md). Selected stdio and Streamable HTTP servers are discovered with pagination, filtered using the Codex settings, namespaced as `<alias>.<tool>`, and forwarded generically.
+`project.open` automatically resolves an existing project or creates a durable or temporary project when requested. Temporary projects are removed when the Local Dev runtime closes.
 
-## ChatGPT UI
+`dev.run` rejects shell-evaluation flags, supports a validated relative `cwd`, returns retained output for nonzero exits and timeouts, and requires `allowNonZero: true` when a nonzero status is expected. `dev.batch` runs two to twenty foreground argv commands sequentially without a shell.
 
-Local Dev includes MCP Apps widgets rendered directly in ChatGPT:
+It reads the shared Codex MCP registry from `~/.codex/config.toml` without modifying it. Local-only project roots, selected downstream server aliases, optional allowlisted local-media inlining, argv-based project hooks, and generic downstream project bindings live in `~/.local-dev/config.json`; see [`docs/configuration.md`](./docs/configuration.md). Selected stdio and Streamable HTTP servers are discovered with pagination, filtered using the Codex settings, namespaced as `<alias>.<tool>`, and forwarded generically.
 
-- Plain, non-visual command tools for `dev.run`, `dev.poll`, and `dev.stop`, avoiding a new widget for every internal development command.
-- One consolidated Git diff view backed by `dev.diff`, intended once after all file edits for a user request.
-- A searchable project picker backed by `project.list` and `project.open`.
-- A recent-call inspector backed by the redacted in-memory journal.
-- A structured question form for one to four agent questions, with single- or multi-select options and custom answers. Submitted answers are posted back into the conversation so the agent can continue.
-- The existing image/audio viewer for allowlisted local media.
+## ChatGPT tool activity
 
-Downstream MCP tools that advertise an MCP Apps resource have their UI URI namespaced and rewritten through Local Dev. The referenced resource is read from the downstream server on demand. Self-contained HTML widgets are the safest compatibility target; downstream widgets remain responsible for valid CSP metadata and reachable external assets.
-
-See [`docs/chatgpt-ui.md`](./docs/chatgpt-ui.md) for the UI architecture, tool contracts, and extension plan.
-
-## Call dashboard
-
-While the tunnel runtime is running, open the private local dashboard with:
-
-```sh
-local-dev dashboard
-```
-
-The dashboard shows native and proxied MCP calls live, including the exact tool name, server alias, redacted arguments, status, duration, bounded result data, and image/audio metadata. It listens only on an ephemeral `127.0.0.1` port behind a random per-runtime URL token; the URL is stored locally with user-only permissions. Calls are held in a 200-entry in-memory ring and are never persisted to a database. Credential-like fields and base64 media bytes are redacted. See [`docs/dashboard.md`](./docs/dashboard.md).
+Local Dev is a tool-only MCP server. It does not expose dashboards, MCP Apps resources, embedded widgets, project pickers, question forms, media viewers, or observability tools. Native and proxied tools provide concise `openai/toolInvocation/invoking` and `openai/toolInvocation/invoked` status metadata so ChatGPT can show command activity in its standard tool UI. Any downstream embedded-UI metadata is stripped while non-UI metadata, schemas, annotations, and tool results are preserved.
 
 ## Set up
 

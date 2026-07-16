@@ -72,26 +72,11 @@ function unavailable(reason: string): DiffCapture {
   return { state: "unavailable", reason };
 }
 
-export function unavailableDiff(reason: string): DiffResult {
+function unavailableDiff(reason: string): DiffResult {
   return {
     summary: {
       state: "unavailable",
       reason,
-      fileCount: 0,
-      additions: 0,
-      deletions: 0,
-      truncated: false,
-      files: [],
-    },
-  };
-}
-
-export function pendingDiff(capture: DiffCapture): DiffResult {
-  if (capture.state === "unavailable") return unavailableDiff(capture.reason ?? "DIFF_UNAVAILABLE");
-  return {
-    summary: {
-      state: "pending",
-      ...(capture.repositoryRoot === undefined ? {} : { repositoryRoot: capture.repositoryRoot }),
       fileCount: 0,
       additions: 0,
       deletions: 0,

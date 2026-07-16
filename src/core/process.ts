@@ -1,3 +1,5 @@
+import { basename } from "node:path";
+
 import { spawnCommand, type SpawnedCommand } from "./command.js";
 
 const MAX_OUTPUT_CHARS = 65_536;
@@ -117,6 +119,17 @@ function start(argv: string[], cwd: string, background: boolean): TrackedProcess
   return tracked;
 }
 
+const SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "fish", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"]);
+const SHELL_EVALUATION_FLAGS = new Set(["-c", "-lc", "/c", "-command", "-encodedcommand"]);
+
+function validateArgv(argv: string[]): void {
+  if (argv.length === 0 || argv.some((part) => part.length === 0)) throw new Error("INVALID_ARGV");
+  const executable = basename(argv[0] as string).toLowerCase();
+  if (SHELL_EXECUTABLES.has(executable) && argv.slice(1).some((part) => SHELL_EVALUATION_FLAGS.has(part.toLowerCase()))) {
+    throw new Error("INVALID_SHELL");
+  }
+}
+
 export class ProcessManager {
   private background: TrackedProcess | undefined;
 
@@ -125,9 +138,7 @@ export class ProcessManager {
   }
 
   async run(argv: string[], cwd: string, background: boolean, timeoutMs?: number): Promise<ProcessSnapshot> {
-    if (argv.length === 0 || argv.some((part) => part.length === 0)) {
-      throw new Error("INVALID_ARGV");
-    }
+    validateArgv(argv);
     if (background) {
       if (this.hasRunningBackground()) throw new Error("BACKGROUND_BUSY");
       this.background = start(argv, cwd, true);
