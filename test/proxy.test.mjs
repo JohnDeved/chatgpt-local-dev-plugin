@@ -27,8 +27,19 @@ test("connects and forwards over Streamable HTTP with environment-backed headers
     downstream.setRequestHandler(ListToolsRequestSchema, () => ({
       tools: [{ name: "read", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } }],
     }));
-    downstream.setRequestHandler(CallToolRequestSchema, ({ params }) => {
+    downstream.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
       callMeta = params._meta;
+      if (extra._meta?.progressToken !== undefined) {
+        await extra.sendNotification({
+          method: "notifications/progress",
+          params: {
+            progressToken: extra._meta.progressToken,
+            progress: 1,
+            total: 2,
+            message: "Downstream server is halfway done",
+          },
+        });
+      }
       return { content: [{ type: "text", text: "http-ok" }] };
     });
     return downstream;
@@ -72,9 +83,20 @@ test("connects and forwards over Streamable HTTP with environment-backed headers
     }]);
     assert.deepEqual(entries.map(({ tool }) => tool.name), ["http.read"]);
     const meta = { "x-codex-turn-metadata": { session_id: "session", turn_id: "turn" } };
-    const result = await entries[0].call({}, meta);
+    const progressUpdates = [];
+    const result = await entries[0].call({}, {
+      meta,
+      progress: {
+        report: async (message, fraction) => { progressUpdates.push({ message, fraction }); },
+      },
+    });
     assert.equal(result.content[0].text, "http-ok");
-    assert.deepEqual(callMeta, meta);
+    assert.deepEqual(callMeta["x-codex-turn-metadata"], meta["x-codex-turn-metadata"]);
+    assert.equal(typeof callMeta.progressToken, "number");
+    assert.deepEqual(progressUpdates, [{
+      message: "Downstream server is halfway done",
+      fraction: 0.5,
+    }]);
   } finally {
     await proxy.close();
     await new Promise((resolve) => http.close(resolve));

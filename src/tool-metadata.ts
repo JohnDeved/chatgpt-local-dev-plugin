@@ -24,6 +24,16 @@ function defaultInvoked(tool: Tool): string {
   return status(`${tool.title ?? tool.name} finished`);
 }
 
+export function toolInvokingStatus(tool: Tool): string {
+  const value = tool._meta?.["openai/toolInvocation/invoking"];
+  return typeof value === "string" ? status(value) : defaultInvoking(tool);
+}
+
+export function toolInvokedStatus(tool: Tool): string {
+  const value = tool._meta?.["openai/toolInvocation/invoked"];
+  return typeof value === "string" ? status(value) : defaultInvoked(tool);
+}
+
 function normalizedAnnotations(tool: Tool): Tool["annotations"] {
   const current = tool.annotations ?? {};
   const idempotent = current.idempotentHint === undefined ? {} : { idempotentHint: current.idempotentHint };

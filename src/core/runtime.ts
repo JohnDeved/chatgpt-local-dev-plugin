@@ -5,8 +5,10 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 
 import type { ProjectBinding, ProjectOpenHook } from "../config/types.js";
 import { isPathInside } from "../path.js";
+import type { ToolProgress } from "../progress.js";
 import { failure, success } from "../result.js";
 import type { JsonObject, JsonValue, ToolCallResult } from "../types.js";
+import { commandLabel } from "./command-label.js";
 import { beginWorkingTreeDiff, finishDiff } from "./diff.js";
 import { ProcessManager, type ProcessSnapshot } from "./process.js";
 import { resolveProject } from "./project.js";
@@ -160,8 +162,13 @@ async function runProjectHooks(
   project: ActiveProject,
   hooks: ProjectOpenHook[],
   processes: ProcessManager,
+  progress?: ToolProgress,
 ): Promise<ToolCallResult | undefined> {
-  for (const hook of hooks) {
+  for (const [index, hook] of hooks.entries()) {
+    await progress?.report(
+      `Project hook ${index + 1}/${hooks.length}: ${commandLabel(hook.argv)}`,
+      0.35 + (index / Math.max(hooks.length, 1)) * 0.2,
+    );
     try {
       const result = await processes.run(hook.argv, project.path, false);
       if (result.exitCode === 0) continue;
@@ -185,6 +192,7 @@ async function projectBindingResults(
   project: string,
   bindings: ProjectBinding[],
   invokeBinding?: ProjectBindingInvoker,
+  progress?: ToolProgress,
 ): Promise<JsonValue[]> {
   if (invokeBinding === undefined) {
     return bindings.map((binding) => ({
@@ -195,7 +203,11 @@ async function projectBindingResults(
     }));
   }
   const results: JsonValue[] = [];
-  for (const binding of bindings) {
+  for (const [index, binding] of bindings.entries()) {
+    await progress?.report(
+      `Synchronizing ${binding.server}.${binding.tool}…`,
+      0.65 + (index / Math.max(bindings.length, 1)) * 0.25,
+    );
     try {
       const result = await invokeBinding(
         `${binding.server}.${binding.tool}`,
@@ -219,6 +231,19 @@ async function projectBindingResults(
   return results;
 }
 
+const COMMAND_PROGRESS_INTERVAL_MS = 5_000;
+
+function commandHeartbeat(progress: ToolProgress | undefined, label: string): () => void {
+  if (progress === undefined) return () => undefined;
+  const started = Date.now();
+  const timer = setInterval(() => {
+    const elapsedSeconds = Math.max(1, Math.round((Date.now() - started) / 1000));
+    void progress.report(`Still running ${label} (${elapsedSeconds}s elapsed)…`);
+  }, COMMAND_PROGRESS_INTERVAL_MS);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
 export class CoreRuntime {
   private activeProject: ActiveProject | null = null;
   private readonly processes = new ProcessManager();
@@ -231,22 +256,39 @@ export class CoreRuntime {
     private readonly invokeBinding?: ProjectBindingInvoker,
   ) {}
 
-  async openProject(query: string, onMissing: MissingProjectAction = "error"): Promise<ToolCallResult> {
+  async openProject(
+    query: string,
+    onMissing: MissingProjectAction = "error",
+    progress?: ToolProgress,
+  ): Promise<ToolCallResult> {
     if (this.processes.hasRunningBackground()) {
       return failure("project.open", "BACKGROUND_RUNNING", "Stop the background process before switching projects.");
     }
+    const queryLabel = basename(query.trim()) || "requested project";
+    await progress?.report(`Searching configured projects for ${queryLabel}…`, 0.1);
     const resolved = await resolveProjectTarget(query, onMissing, this.roots);
     if (resolved.error !== undefined) return resolved.error;
     const project = resolved.target;
+    await progress?.report(`Resolved ${basename(project.path)}; checking project setup…`, 0.25);
     const hooks = await matchingHooks(project.path, this.projectOpenHooks);
-    const hookFailure = await runProjectHooks(project, hooks, this.processes);
+    if (hooks.length === 0) await progress?.report("No project hooks configured; activating project…", 0.45);
+    const hookFailure = await runProjectHooks(project, hooks, this.processes, progress);
     if (hookFailure !== undefined) return hookFailure;
 
-    const bindings = await projectBindingResults(project.path, this.projectBindings, this.invokeBinding);
+    if (this.projectBindings.length === 0) {
+      await progress?.report("No downstream project bindings; activating project…", 0.75);
+    }
+    const bindings = await projectBindingResults(
+      project.path,
+      this.projectBindings,
+      this.invokeBinding,
+      progress,
+    );
     const warnings = bindings.filter((binding) =>
       typeof binding === "object" && binding !== null && !Array.isArray(binding) && binding.status === "error").length;
     this.activeProject = project;
     if (project.kind === "temporary") this.temporaryProjects.add(project.path);
+    await progress?.report(`Project ${basename(project.path)} is active`, 0.95);
     return success(
       "project.open",
       { path: project.path, kind: project.kind, hooksRun: hooks.length, bindings, bindingWarnings: warnings },
@@ -268,19 +310,29 @@ export class CoreRuntime {
     timeoutMs?: number,
     cwd?: string,
     allowNonZero = false,
+    progress?: ToolProgress,
   ): Promise<ToolCallResult> {
     if (this.activeProject === null) return failure("dev.run", "NO_ACTIVE_PROJECT", "Resolve a project before running a command.");
+    const label = commandLabel(argv);
+    await progress?.report(background ? `Starting ${label} in the background…` : `Running ${label}…`, 0.1);
+    const stopHeartbeat = background ? () => undefined : commandHeartbeat(progress, label);
     try {
       const resolvedCwd = await commandCwd(this.activeProject.path, cwd);
       const result = await this.processes.run(argv, resolvedCwd, background, timeoutMs);
       if (!background && result.exitCode !== 0 && !allowNonZero) {
+        await progress?.report(`${label} exited with status ${result.exitCode}`, 0.9);
         return failure("dev.run", "COMMAND_EXIT_NONZERO", `Command exited with status ${result.exitCode}.`, processData(result));
       }
+      await progress?.report(
+        background ? `Started ${label} as process ${result.pid}` : `Finished ${label} with exit code ${result.exitCode}`,
+        0.9,
+      );
       return success("dev.run", processData(result), background ? `started pid=${result.pid}` : `exit=${result.exitCode}`);
     } catch (error) {
       const code = error instanceof Error ? error.message : "COMMAND_FAILED";
       const snapshot = errorSnapshot(error);
       if (code === "COMMAND_TIMEOUT") {
+        await progress?.report(`${label} timed out and was stopped`, 0.9);
         return failure(
           "dev.run",
           code,
@@ -292,15 +344,35 @@ export class CoreRuntime {
       if (code === "INVALID_ARGV") return failure("dev.run", code, "argv must contain a command and non-empty arguments.");
       if (code === "INVALID_SHELL") return failure("dev.run", code, "Shell evaluation flags are not allowed; pass the executable and arguments directly.");
       if (code === "INVALID_CWD") return failure("dev.run", code, "cwd must be an existing relative directory inside the active project.");
+      await progress?.report(`${label} could not be started`, 0.9);
       return failure("dev.run", "COMMAND_FAILED", "Command could not be started.");
+    } finally {
+      stopHeartbeat();
     }
   }
 
-  async batch(steps: BatchStep[], stopOnError: boolean): Promise<ToolCallResult> {
+  async batch(
+    steps: BatchStep[],
+    stopOnError: boolean,
+    progress?: ToolProgress,
+  ): Promise<ToolCallResult> {
     const results: JsonValue[] = [];
     let firstFailure: number | null = null;
+    await progress?.report(`Preparing ${steps.length} command steps…`, 0.05);
     for (const [index, step] of steps.entries()) {
-      const command = await this.run(step.argv, false, step.timeoutMs, step.cwd, step.allowNonZero === true);
+      const label = commandLabel(step.argv);
+      await progress?.report(
+        `Step ${index + 1}/${steps.length}: ${label}`,
+        0.1 + (index / steps.length) * 0.75,
+      );
+      const command = await this.run(
+        step.argv,
+        false,
+        step.timeoutMs,
+        step.cwd,
+        step.allowNonZero === true,
+        progress,
+      );
       const structured = command.structuredContent;
       results.push({
         index,
@@ -309,6 +381,12 @@ export class CoreRuntime {
         data: structured.data,
         error: structured.error === null ? null : { code: structured.error.code, message: structured.error.message },
       });
+      await progress?.report(
+        structured.ok
+          ? `Completed step ${index + 1}/${steps.length}: ${label}`
+          : `Step ${index + 1}/${steps.length} failed: ${label}`,
+        0.1 + ((index + 1) / steps.length) * 0.75,
+      );
       if (!structured.ok && firstFailure === null) firstFailure = index;
       if (!structured.ok && stopOnError) break;
     }
@@ -320,6 +398,7 @@ export class CoreRuntime {
         { steps: results, failedStep: firstFailure },
       );
     }
+    await progress?.report(`Completed all ${results.length} command steps`, 0.95);
     return success("dev.batch", { steps: results }, `${results.length} steps completed`);
   }
 
@@ -328,14 +407,20 @@ export class CoreRuntime {
     return success("dev.poll", processData(result), `state=${result.state}`);
   }
 
-  async stop(): Promise<ToolCallResult> {
+  async stop(progress?: ToolProgress): Promise<ToolCallResult> {
+    await progress?.report("Sending the background process a stop signal…", 0.25);
     const result = await this.processes.stop();
+    await progress?.report(`Background process is ${result.state}`, 0.9);
     return success("dev.stop", processData(result), `state=${result.state}`);
   }
 
-  async diff(): Promise<ToolCallResult> {
+  async diff(progress?: ToolProgress): Promise<ToolCallResult> {
     if (this.activeProject === null) return failure("dev.diff", "NO_ACTIVE_PROJECT", "Resolve a project before viewing changes.");
-    const result = await finishDiff(await beginWorkingTreeDiff(this.activeProject.path));
+    await progress?.report("Reading Git working-tree changes…", 0.2);
+    const baseline = await beginWorkingTreeDiff(this.activeProject.path);
+    await progress?.report("Building the bounded project diff…", 0.6);
+    const result = await finishDiff(baseline);
+    await progress?.report(`Found ${result.summary.fileCount} changed files`, 0.9);
     return success(
       "dev.diff",
       { changes: result.summary } as unknown as JsonValue,

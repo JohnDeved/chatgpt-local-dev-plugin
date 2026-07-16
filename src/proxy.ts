@@ -8,6 +8,7 @@ import {
   type CallToolResult,
   type ElicitRequest,
   type ElicitResult,
+  type Progress,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 
@@ -100,12 +101,34 @@ async function connectSelected(selection: ResolvedSelectedServer, elicitInput: E
       : undefined;
     return {
       tool: prepareProxiedTool({ ...tool, name: exposedName }, { serverId: server.id, alias, sourceName: tool.name }),
-      call: async (arguments_, meta) => {
+      call: async (arguments_, context) => {
         try {
+          const progress = context?.progress;
           const result = await client.callTool(
-            { name: tool.name, arguments: arguments_, ...(meta === undefined ? {} : { _meta: meta }) },
+            {
+              name: tool.name,
+              arguments: arguments_,
+              ...(context?.meta === undefined ? {} : { _meta: context.meta }),
+            },
             CallToolResultSchema,
-            { timeout: server.toolTimeoutMs },
+            {
+              timeout: server.toolTimeoutMs,
+              ...(context?.signal === undefined ? {} : { signal: context.signal }),
+              ...(progress === undefined
+                ? {}
+                : {
+                    onprogress: (update: Progress) => {
+                      const fraction = update.total === undefined || update.total <= 0
+                        ? undefined
+                        : update.progress / update.total;
+                      void progress.report(
+                        update.message ?? `Running ${tool.title ?? tool.name}…`,
+                        fraction === undefined ? undefined : 0.05 + Math.min(Math.max(fraction, 0), 1) * 0.9,
+                      );
+                    },
+                    resetTimeoutOnProgress: true,
+                  }),
+            },
           ) as CallToolResult;
           return await inlineLocalMedia(result, mediaConfiguration);
         } catch {

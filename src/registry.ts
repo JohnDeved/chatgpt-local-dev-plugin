@@ -1,8 +1,10 @@
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 
+import type { ToolCallContext } from "./progress.js";
+
 export interface RegistryEntry {
   tool: Tool;
-  call: (arguments_: Record<string, unknown>, meta?: Record<string, unknown>) => Promise<CallToolResult> | CallToolResult;
+  call: (arguments_: Record<string, unknown>, context?: ToolCallContext) => Promise<CallToolResult> | CallToolResult;
 }
 
 export class ToolRegistry {

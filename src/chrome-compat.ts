@@ -55,11 +55,11 @@ function javascriptEntry(
 ): RegistryEntry {
   return {
     tool: tool(name, title, description, inputSchema),
-    call: async (arguments_, meta) => await chromeJs.call({
+    call: async (arguments_, context) => await chromeJs.call({
       code: code(arguments_),
       title,
       timeout_ms: 60_000,
-    }, meta) as CallToolResult,
+    }, context) as CallToolResult,
   };
 }
 

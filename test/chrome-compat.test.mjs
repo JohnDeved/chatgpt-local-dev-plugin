@@ -7,8 +7,8 @@ test("maps cached Chrome tool names to the node_repl Chrome bridge", async () =>
   const calls = [];
   const chromeJs = {
     tool: { name: "chrome.js", inputSchema: { type: "object", properties: {} } },
-    call: async (arguments_, meta) => {
-      calls.push({ arguments_, meta });
+    call: async (arguments_, context) => {
+      calls.push({ arguments_, context });
       return { content: [{ type: "text", text: "ok" }] };
     },
   };
@@ -20,9 +20,10 @@ test("maps cached Chrome tool names to the node_repl Chrome bridge", async () =>
   ]);
 
   const meta = { "x-codex-turn-metadata": { session_id: "session", turn_id: "turn" } };
-  await entries[1].call({ script: "continue until it works" }, meta);
+  const context = { meta };
+  await entries[1].call({ script: "continue until it works" }, context);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].meta, meta);
+  assert.equal(calls[0].context, context);
   assert.equal(calls[0].arguments_.title, "Inspect Chrome");
   assert.equal(calls[0].arguments_.timeout_ms, 60_000);
   assert.match(calls[0].arguments_.code, /agent\.browsers\.get\("extension"\)/u);

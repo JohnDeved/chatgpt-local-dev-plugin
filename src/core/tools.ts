@@ -114,11 +114,11 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         outputSchema: envelope,
         annotations: annotations(false, false, false),
       }, "Resolving project…", "Project ready"),
-      call: async (input) => {
+      call: async (input, context) => {
         if (typeof input.query !== "string" || input.query.length === 0 || input.query.length > 1024) return invalid("project.open");
         if (input.onMissing !== undefined && !validMissingAction(input.onMissing)) return invalid("project.open");
         if (Object.keys(input).some((key) => !["query", "onMissing"].includes(key))) return invalid("project.open");
-        return result(await runtime.openProject(input.query, input.onMissing ?? "error"));
+        return result(await runtime.openProject(input.query, input.onMissing ?? "error", context?.progress));
       },
     },
     {
@@ -153,7 +153,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         outputSchema: envelope,
         annotations: annotations(false, true, false),
       }, "Running command…", "Command finished"),
-      call: async (input) => {
+      call: async (input, context) => {
         if (!validArgv(input.argv)) return invalid("dev.run");
         if (input.background !== undefined && typeof input.background !== "boolean") return invalid("dev.run");
         if (!validCommandOptions(input, ["argv", "background", "cwd", "timeoutMs", "allowNonZero"])) return invalid("dev.run");
@@ -163,6 +163,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
           input.timeoutMs as number | undefined,
           input.cwd as string | undefined,
           input.allowNonZero === true,
+          context?.progress,
         ));
       },
     },
@@ -198,13 +199,13 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         outputSchema: envelope,
         annotations: annotations(false, true, false),
       }, "Running command batch…", "Command batch finished"),
-      call: async (input) => {
+      call: async (input, context) => {
         if (!Array.isArray(input.steps) || input.steps.length < 2 || input.steps.length > 20) return invalid("dev.batch");
         if (input.stopOnError !== undefined && typeof input.stopOnError !== "boolean") return invalid("dev.batch");
         if (Object.keys(input).some((key) => !["steps", "stopOnError"].includes(key))) return invalid("dev.batch");
         const steps = input.steps.map(batchStep);
         if (steps.some((step) => step === undefined)) return invalid("dev.batch");
-        return result(await runtime.batch(steps as BatchStep[], input.stopOnError !== false));
+        return result(await runtime.batch(steps as BatchStep[], input.stopOnError !== false, context?.progress));
       },
     },
     {
@@ -227,7 +228,9 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         outputSchema: envelope,
         annotations: annotations(false, true, true),
       }, "Stopping background process…", "Background process stopped"),
-      call: async (input) => Object.keys(input).length === 0 ? result(await runtime.stop()) : invalid("dev.stop"),
+      call: async (input, context) => Object.keys(input).length === 0
+        ? result(await runtime.stop(context?.progress))
+        : invalid("dev.stop"),
     },
     {
       tool: withToolStatus({
@@ -238,7 +241,9 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         outputSchema: envelope,
         annotations: annotations(true, false, true),
       }, "Reading project changes…", "Project changes ready"),
-      call: async (input) => Object.keys(input).length === 0 ? result(await runtime.diff()) : invalid("dev.diff"),
+      call: async (input, context) => Object.keys(input).length === 0
+        ? result(await runtime.diff(context?.progress))
+        : invalid("dev.diff"),
     },
   ];
 }

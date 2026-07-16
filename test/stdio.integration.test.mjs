@@ -9,6 +9,7 @@ class McpProcess {
   constructor(env) {
     this.nextId = 1;
     this.pending = new Map();
+    this.notifications = [];
     this.stderr = "";
     this.buffer = "";
     this.process = spawn(process.execPath, ["dist/cli.js"], {
@@ -34,16 +35,18 @@ class McpProcess {
         if (waiter) {
           this.pending.delete(message.id);
           waiter(message);
+        } else if (typeof message.method === "string") {
+          this.notifications.push(message);
         }
       }
       newline = this.buffer.indexOf("\n");
     }
   }
 
-  request(method, params) {
+  request(method, params, timeoutMs = 5_000) {
     const id = this.nextId++;
     const response = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`timeout waiting for ${method}: ${this.stderr}`)), 5_000);
+      const timer = setTimeout(() => reject(new Error(`timeout waiting for ${method}: ${this.stderr}`)), timeoutMs);
       this.pending.set(id, (message) => {
         clearTimeout(timer);
         resolve(message);
@@ -104,6 +107,8 @@ test("production stdio server exposes tool-only native tools with ChatGPT status
   try {
     const initialized = await initialize(client);
     assert.deepEqual(initialized.result.serverInfo, { name: "local-dev", version: "0.3.0" });
+    assert.match(initialized.result.instructions, /Keep the user visibly informed/u);
+    assert.match(initialized.result.instructions, /roughly every three tool calls/u);
     assert.equal("resources" in initialized.result.capabilities, false);
     const listed = await client.request("tools/list", {});
     assert.deepEqual(listed.result.tools.map(({ name }) => name), [
@@ -129,6 +134,66 @@ test("production stdio server exposes tool-only native tools with ChatGPT status
     const current = await client.request("tools/call", { name: "project.current", arguments: {} });
     assert.equal(current.result.structuredContent.data.path, null);
     assert.equal(client.stderr, "");
+  } finally {
+    client.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("streams human-readable progress for long native tools", async () => {
+  const { home } = await fixture();
+  const client = new McpProcess({ ...process.env, HOME: home });
+  const updates = (token) => client.notifications
+    .filter(({ method, params }) => method === "notifications/progress" && params.progressToken === token)
+    .map(({ params }) => params);
+  const assertMonotonic = (values) => {
+    assert.equal(values[0].progress, 0);
+    assert.equal(values.at(-1).progress, 100);
+    for (let index = 1; index < values.length; index += 1) {
+      assert.ok(values[index].progress > values[index - 1].progress);
+    }
+  };
+
+  try {
+    await initialize(client);
+    const opened = await client.request("tools/call", {
+      name: "project.open",
+      arguments: { query: "demo" },
+      _meta: { progressToken: "open-progress" },
+    });
+    assert.equal(opened.result.structuredContent.ok, true);
+    const openUpdates = updates("open-progress");
+    assertMonotonic(openUpdates);
+    assert.equal(openUpdates.some(({ message }) => /Searching configured projects/u.test(message)), true);
+    assert.equal(openUpdates.some(({ message }) => /Project demo is active/u.test(message)), true);
+
+    const run = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: { argv: ["/bin/sleep", "5.2"], timeoutMs: 7_000 },
+      _meta: { progressToken: "run-progress" },
+    }, 9_000);
+    assert.equal(run.result.structuredContent.ok, true);
+    const runUpdates = updates("run-progress");
+    assertMonotonic(runUpdates);
+    assert.equal(runUpdates.some(({ message }) => /Running sleep 5\.2/u.test(message)), true);
+    assert.equal(runUpdates.some(({ message }) => /Still running sleep 5\.2 \(5s elapsed\)/u.test(message)), true);
+
+    const batch = await client.request("tools/call", {
+      name: "dev.batch",
+      arguments: {
+        steps: [
+          { argv: [process.execPath, "--version"] },
+          { argv: [process.execPath, "--version"] },
+        ],
+      },
+      _meta: { progressToken: "batch-progress" },
+    });
+    assert.equal(batch.result.structuredContent.ok, true);
+    const batchUpdates = updates("batch-progress");
+    assertMonotonic(batchUpdates);
+    assert.equal(batchUpdates.some(({ message }) => /Step 1\/2: node --version/u.test(message)), true);
+    assert.equal(batchUpdates.some(({ message }) => /Step 2\/2: node --version/u.test(message)), true);
+    assert.equal(batchUpdates.some(({ message }) => /Completed all 2 command steps/u.test(message)), true);
   } finally {
     client.close();
     await rm(home, { recursive: true, force: true });
