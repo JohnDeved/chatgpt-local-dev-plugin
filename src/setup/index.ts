@@ -207,6 +207,7 @@ export async function runSetup(
   const configuration: LocalDevConfig = {
     version: 1,
     projectRoots: roots,
+    browserOriginPolicy: existingLocal?.browserOriginPolicy ?? "ask",
     approvedBrowserOrigins: existingLocal?.approvedBrowserOrigins ?? [],
     selectedServers: selections,
     projectOpenHooks: existingLocal?.projectOpenHooks.filter(({ projectRoot }) => hookInsideRoots(projectRoot, roots)) ?? [],

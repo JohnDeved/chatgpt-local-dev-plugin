@@ -51,6 +51,7 @@ export async function runServer(): Promise<void> {
     await resolveElicitation(
       params,
       configuration.localDev.approvedBrowserOrigins,
+      configuration.localDev.browserOriginPolicy,
       async (request) => await server.elicitInput(request),
     )
   );

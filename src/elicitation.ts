@@ -1,5 +1,7 @@
 import type { ElicitRequest, ElicitResult } from "@modelcontextprotocol/sdk/types.js";
 
+import type { BrowserOriginPolicy } from "./config/types.js";
+
 type ElicitInput = (params: ElicitRequest["params"]) => Promise<ElicitResult>;
 type UnknownRecord = Record<string, unknown>;
 
@@ -13,16 +15,13 @@ function matches(value: UnknownRecord | undefined, expected: UnknownRecord): boo
   return value !== undefined && Object.entries(expected).every(([key, expectedValue]) => value[key] === expectedValue);
 }
 
-export function preapprovedBrowserOriginAccess(
-  params: ElicitRequest["params"],
-  approvedOrigins: readonly string[],
-): ElicitResult | undefined {
+function browserOriginAccessRequest(params: ElicitRequest["params"]): string | undefined {
   if (params.mode !== "form") return undefined;
 
   const meta = record(params._meta);
   const schema = record(params.requestedSchema);
   const origin = meta?.origin;
-  if (typeof origin !== "string" || !approvedOrigins.includes(origin)) return undefined;
+  if (typeof origin !== "string") return undefined;
   if (!matches(meta, {
     codex_approval_kind: "mcp_tool_call",
     codex_request_type: "approval_request",
@@ -32,7 +31,17 @@ export function preapprovedBrowserOriginAccess(
   })) return undefined;
   if (!matches(record(meta?.tool_params), { origin }) || !matches(schema, { type: "object" })) return undefined;
   const properties = record(schema?.properties);
-  return properties !== undefined && Object.keys(properties).length === 0
+  return properties !== undefined && Object.keys(properties).length === 0 ? origin : undefined;
+}
+
+export function preapprovedBrowserOriginAccess(
+  params: ElicitRequest["params"],
+  approvedOrigins: readonly string[],
+  policy: BrowserOriginPolicy = "ask",
+): ElicitResult | undefined {
+  const origin = browserOriginAccessRequest(params);
+  if (origin === undefined) return undefined;
+  return policy === "allow-all" || approvedOrigins.includes(origin)
     ? { action: "accept", content: {} }
     : undefined;
 }
@@ -40,7 +49,8 @@ export function preapprovedBrowserOriginAccess(
 export async function resolveElicitation(
   params: ElicitRequest["params"],
   approvedOrigins: readonly string[],
+  policy: BrowserOriginPolicy,
   forward: ElicitInput,
 ): Promise<ElicitResult> {
-  return preapprovedBrowserOriginAccess(params, approvedOrigins) ?? await forward(params);
+  return preapprovedBrowserOriginAccess(params, approvedOrigins, policy) ?? await forward(params);
 }

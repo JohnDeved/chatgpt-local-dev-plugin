@@ -10,6 +10,7 @@ Local Dev uses this versioned shape:
 {
   "version": 1,
   "projectRoots": ["/absolute/project/root"],
+  "browserOriginPolicy": "ask",
   "approvedBrowserOrigins": ["https://chatgpt.com"],
   "selectedServers": [
     { "id": "serena", "alias": "code" },
@@ -30,7 +31,7 @@ Local Dev uses this versioned shape:
 
 Project roots must be absolute and unique. `project.open` matches directories by folder name, `package.json` name, or Git remote repository name, so renamed worktrees can still be opened by their canonical project name. Metadata reads are local and bounded. Server ids and aliases must be unique. Hooks use argument arrays only; shell strings are rejected. Local Dev rejects unknown fields to catch misspellings.
 
-`approvedBrowserOrigins` is an optional exact-match allowlist for empty Browser Use `access_browser_origin` form approvals. Entries must be unique HTTP or HTTPS origins without paths. Local Dev accepts only that narrow origin-access request for a configured origin; requests with form fields, other browser tools, or other origins still flow to the upstream client for confirmation.
+`browserOriginPolicy` controls Browser Use origin access. `"ask"` keeps the upstream confirmation flow for unknown origins, while exact entries in `approvedBrowserOrigins` are accepted automatically. `"allow-all"` automatically accepts every valid empty Browser Use `access_browser_origin` request, so navigation works across websites without per-origin configuration or restarts. The policy never auto-accepts other elicitation forms or other browser tools. `approvedBrowserOrigins` entries must be unique HTTP or HTTPS origins without paths.
 
 `projectBindings` synchronizes project-aware downstream MCP servers after Local Dev opens a project. Each binding references a selected server alias and an original downstream tool name. Its JSON-object arguments may contain `${projectPath}` anywhere in string values; Local Dev substitutes the resolved active-project path recursively, invokes the exposed `<server>.<tool>`, and returns bounded per-binding status and warnings in the `project.open` result. Bindings are generic configuration, not server-specific adapters. Missing or failing binding tools do not prevent Local Dev from opening the project.
 

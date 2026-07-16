@@ -64,9 +64,12 @@ export interface ProjectBinding {
   arguments: { [key: string]: JsonValue };
 }
 
+export type BrowserOriginPolicy = "ask" | "allow-all";
+
 export interface LocalDevConfig {
   version: 1;
   projectRoots: string[];
+  browserOriginPolicy: BrowserOriginPolicy;
   approvedBrowserOrigins: string[];
   selectedServers: SelectedServer[];
   projectOpenHooks: ProjectOpenHook[];

@@ -3,6 +3,7 @@ import { parse } from "smol-toml";
 import { ConfigError } from "./error.js";
 import type {
   ApprovalMode,
+  BrowserOriginPolicy,
   HttpMcpServer,
   InlineMediaConfig,
   LocalDevConfig,
@@ -251,6 +252,16 @@ function browserOrigin(value: unknown, path: string): string {
   return origin;
 }
 
+function browserOriginPolicy(value: unknown): BrowserOriginPolicy {
+  if (value === undefined || value === "ask") return "ask";
+  if (value === "allow-all") return value;
+  throw new ConfigError(
+    "INVALID_LOCAL_CONFIG",
+    "localDev.browserOriginPolicy",
+    "localDev.browserOriginPolicy must be ask or allow-all.",
+  );
+}
+
 function localJsonValue(value: unknown, path: string, depth = 0): JsonValue {
   if (depth > 12) throw new ConfigError("INVALID_LOCAL_CONFIG", path, `${path} exceeds the supported nesting depth.`);
   if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") return value;
@@ -298,6 +309,7 @@ export function defaultLocalDevConfig(): LocalDevConfig {
   return {
     version: 1,
     projectRoots: [],
+    browserOriginPolicy: "ask",
     approvedBrowserOrigins: [],
     selectedServers: [],
     projectOpenHooks: [],
@@ -315,7 +327,7 @@ export function parseLocalDevConfig(source: string, sourcePath = "config.json"):
   const input = localRecord(raw, "localDev");
   requireKeys(
     input,
-    ["version", "projectRoots", "approvedBrowserOrigins", "selectedServers", "projectOpenHooks", "projectBindings"],
+    ["version", "projectRoots", "browserOriginPolicy", "approvedBrowserOrigins", "selectedServers", "projectOpenHooks", "projectBindings"],
     "localDev",
   );
   if (input.version !== 1) {
@@ -334,6 +346,7 @@ export function parseLocalDevConfig(source: string, sourcePath = "config.json"):
   if (new Set(projectRoots).size !== projectRoots.length) {
     throw new ConfigError("INVALID_LOCAL_CONFIG", "localDev.projectRoots", "Project roots must be unique.");
   }
+  const configuredBrowserOriginPolicy = browserOriginPolicy(input.browserOriginPolicy);
   const rawApprovedBrowserOrigins = input.approvedBrowserOrigins ?? [];
   if (!Array.isArray(rawApprovedBrowserOrigins)) {
     throw new ConfigError(
@@ -408,6 +421,7 @@ export function parseLocalDevConfig(source: string, sourcePath = "config.json"):
   return {
     version: 1,
     projectRoots,
+    browserOriginPolicy: configuredBrowserOriginPolicy,
     approvedBrowserOrigins,
     selectedServers,
     projectOpenHooks,

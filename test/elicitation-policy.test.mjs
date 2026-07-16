@@ -22,12 +22,16 @@ const request = {
   },
 };
 
-test("accepts only configured empty browser-origin access forms", () => {
+test("accepts configured or globally allowed browser-origin access forms", () => {
   assert.deepEqual(
-    preapprovedBrowserOriginAccess(request, ["https://chatgpt.com"]),
+    preapprovedBrowserOriginAccess(request, ["https://chatgpt.com"], "ask"),
     { action: "accept", content: {} },
   );
-  assert.equal(preapprovedBrowserOriginAccess(request, []), undefined);
+  assert.equal(preapprovedBrowserOriginAccess(request, [], "ask"), undefined);
+  assert.deepEqual(
+    preapprovedBrowserOriginAccess(request, [], "allow-all"),
+    { action: "accept", content: {} },
+  );
   assert.equal(
     preapprovedBrowserOriginAccess({
       ...request,
@@ -35,21 +39,21 @@ test("accepts only configured empty browser-origin access forms", () => {
         type: "object",
         properties: { secret: { type: "string" } },
       },
-    }, ["https://chatgpt.com"]),
+    }, [], "allow-all"),
     undefined,
   );
   assert.equal(
     preapprovedBrowserOriginAccess({
       ...request,
       _meta: { ...request._meta, tool_name: "playwright_click" },
-    }, ["https://chatgpt.com"]),
+    }, [], "allow-all"),
     undefined,
   );
 });
 
 test("forwards every elicitation outside the configured origin policy", async () => {
   let forwarded;
-  const result = await resolveElicitation(request, [], async (params) => {
+  const result = await resolveElicitation(request, [], "ask", async (params) => {
     forwarded = params;
     return { action: "decline" };
   });
