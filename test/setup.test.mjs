@@ -109,6 +109,7 @@ test("launch agent is escaped, loaded idempotently, and removable", async () => 
     const source = launchAgentPlist("/tmp/tunnel&client", ["runtimes", "connect", "--runtime-api-key", "file:/tmp/key"], paths);
     assert.match(source, /tunnel&amp;client/u);
     assert.match(source, /<key>RunAtLoad<\/key><true\/>/u);
+    assert.match(source, /<key>StartInterval<\/key><integer>60<\/integer>/u);
     await installLaunchAgent(paths, "/tmp/tunnel-client", ["runtimes", "connect"], runner);
     await installLaunchAgent(paths, "/tmp/tunnel-client", ["runtimes", "connect"], runner);
     assert.ok(calls.some((call) => call.includes("bootstrap")));

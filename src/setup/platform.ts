@@ -23,6 +23,7 @@ export function launchAgentPlist(program: string, args: string[], paths: SetupPa
 ${argumentsXml}
   </array>
   <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>60</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>${xml(join(paths.logDirectory, "launch-agent.out.log"))}</string>
   <key>StandardErrorPath</key><string>${xml(join(paths.logDirectory, "launch-agent.err.log"))}</string>

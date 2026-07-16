@@ -267,7 +267,7 @@ export async function runSetup(
     if (options.installService !== false) {
       await installLaunchAgent(paths, binaryPath, connectArgs);
       serviceInstalled = true;
-      reporter.line("[✓] macOS login auto-start installed");
+      reporter.line("[✓] macOS login auto-start and 60-second tunnel recovery installed");
     }
     const state: SetupState = {
       version: 1,
