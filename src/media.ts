@@ -11,39 +11,34 @@ interface DetectedMedia {
   mimeType: string;
 }
 
+interface PrefixMedia extends DetectedMedia {
+  prefix: Buffer;
+}
+
+const PREFIX_MEDIA: readonly PrefixMedia[] = [
+  { prefix: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), type: "image", mimeType: "image/png" },
+  { prefix: Buffer.from([255, 216, 255]), type: "image", mimeType: "image/jpeg" },
+  { prefix: Buffer.from("GIF87a", "ascii"), type: "image", mimeType: "image/gif" },
+  { prefix: Buffer.from("GIF89a", "ascii"), type: "image", mimeType: "image/gif" },
+  { prefix: Buffer.from("OggS", "ascii"), type: "audio", mimeType: "audio/ogg" },
+  { prefix: Buffer.from("fLaC", "ascii"), type: "audio", mimeType: "audio/flac" },
+  { prefix: Buffer.from("ID3", "ascii"), type: "audio", mimeType: "audio/mpeg" },
+];
+const RIFF_MEDIA: Readonly<Record<string, DetectedMedia>> = {
+  WEBP: { type: "image", mimeType: "image/webp" },
+  WAVE: { type: "audio", mimeType: "audio/wav" },
+};
+const MPEG_AUDIO: DetectedMedia = { type: "audio", mimeType: "audio/mpeg" };
+
 function ascii(data: Buffer, start: number, end: number): string {
   return data.subarray(start, end).toString("ascii");
 }
 
 function detectMedia(data: Buffer): DetectedMedia | undefined {
-  if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
-    return { type: "image", mimeType: "image/png" };
-  }
-  if (data.length >= 3 && data[0] === 255 && data[1] === 216 && data[2] === 255) {
-    return { type: "image", mimeType: "image/jpeg" };
-  }
-  if (data.length >= 6 && ["GIF87a", "GIF89a"].includes(ascii(data, 0, 6))) {
-    return { type: "image", mimeType: "image/gif" };
-  }
-  if (data.length >= 12 && ascii(data, 0, 4) === "RIFF" && ascii(data, 8, 12) === "WEBP") {
-    return { type: "image", mimeType: "image/webp" };
-  }
-  if (data.length >= 12 && ascii(data, 0, 4) === "RIFF" && ascii(data, 8, 12) === "WAVE") {
-    return { type: "audio", mimeType: "audio/wav" };
-  }
-  if (data.length >= 4 && ascii(data, 0, 4) === "OggS") {
-    return { type: "audio", mimeType: "audio/ogg" };
-  }
-  if (data.length >= 4 && ascii(data, 0, 4) === "fLaC") {
-    return { type: "audio", mimeType: "audio/flac" };
-  }
-  if (data.length >= 3 && ascii(data, 0, 3) === "ID3") {
-    return { type: "audio", mimeType: "audio/mpeg" };
-  }
-  if (data[0] === 255 && data[1] !== undefined && (data[1] & 224) === 224) {
-    return { type: "audio", mimeType: "audio/mpeg" };
-  }
-  return undefined;
+  const prefixed = PREFIX_MEDIA.find(({ prefix }) => data.subarray(0, prefix.length).equals(prefix));
+  if (prefixed !== undefined) return { type: prefixed.type, mimeType: prefixed.mimeType };
+  if (ascii(data, 0, 4) === "RIFF") return RIFF_MEDIA[ascii(data, 8, 12)];
+  return data[0] === 255 && ((data[1] ?? 0) & 224) === 224 ? MPEG_AUDIO : undefined;
 }
 
 async function resolvedRoots(roots: string[]): Promise<string[]> {

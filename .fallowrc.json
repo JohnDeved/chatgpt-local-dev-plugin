@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  "health": {
+    "maxCrap": 200
+  },
+  "audit": {
+    "gate": "new-only"
+  }
+}

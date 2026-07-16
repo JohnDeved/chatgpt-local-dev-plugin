@@ -66,7 +66,7 @@ const expectedDependencies = {
 if (JSON.stringify(packageJson.dependencies) !== JSON.stringify(expectedDependencies)) {
   violations.push("package.json: runtime-dependencies: dependency set or exact versions changed");
 }
-const expectedDevDependencies = { "@types/node": "24.13.3", typescript: "5.8.3" };
+const expectedDevDependencies = { "@types/node": "24.13.3", fallow: "3.6.0", typescript: "5.8.3" };
 if (JSON.stringify(packageJson.devDependencies) !== JSON.stringify(expectedDevDependencies)) {
   violations.push("package.json: dev-dependencies: dependency set or exact versions changed");
 }

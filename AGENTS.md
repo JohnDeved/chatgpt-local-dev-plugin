@@ -23,6 +23,12 @@ npm run check
 
 It must pass formatting, policy lint, TypeScript typechecking, build, and tests in one invocation.
 
+## Polishing workflow
+
+Run `npm run polish` before publishing cleanup or refactoring work. It runs the repository check, gates only Fallow findings introduced by the current working tree, then prints the full dead-code, duplication, and health report.
+
+Use the Ponytail full ladder before editing: understand the complete flow, then delete or reuse before adding; prefer the standard library, native platform, and already-installed dependencies; stop at the smallest safe change. Do not split files or add abstractions solely to improve a metric. Non-trivial logic keeps one runnable regression check. The source ruleset is `DietrichGebert/ponytail`; Fallow is pinned as a development dependency for deterministic local runs.
+
 ## Hard checkpoint rule
 
 Phase 1 is normally a human compatibility gate. The repository owner explicitly directed implementation to continue on 2026-07-13 after the exact ping, structured echo, tool refresh, and four-call chain passed through the real tunnel. Remaining Phase 1 rows stay unverified and must not be described as passing.

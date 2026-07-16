@@ -24,7 +24,7 @@ npm run build
 npm start
 ```
 
-`npm run check` is the exact repository-wide check. The automated integration tests start the stdio server with temporary home directories and no credentials, browser, service, tunnel, or user configuration.
+`npm run check` is the exact repository-wide check. Run `npm run polish` for a repeatable Fallow change audit plus a repo-wide dead-code, duplication, and health report; agents also follow the Ponytail minimal-change ladder in [`AGENTS.md`](./AGENTS.md). The automated integration tests start the stdio server with temporary home directories and no credentials, browser, service, tunnel, or user configuration.
 
 The production server exposes seven native tools:
 

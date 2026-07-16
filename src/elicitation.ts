@@ -9,6 +9,10 @@ function record(value: unknown): UnknownRecord | undefined {
     : undefined;
 }
 
+function matches(value: UnknownRecord | undefined, expected: UnknownRecord): boolean {
+  return value !== undefined && Object.entries(expected).every(([key, expectedValue]) => value[key] === expectedValue);
+}
+
 export function preapprovedBrowserOriginAccess(
   params: ElicitRequest["params"],
   approvedOrigins: readonly string[],
@@ -16,25 +20,21 @@ export function preapprovedBrowserOriginAccess(
   if (params.mode !== "form") return undefined;
 
   const meta = record(params._meta);
-  const toolParams = record(meta?.tool_params);
   const schema = record(params.requestedSchema);
-  const properties = record(schema?.properties);
   const origin = meta?.origin;
-
-  if (
-    typeof origin !== "string"
-    || !approvedOrigins.includes(origin)
-    || meta?.codex_approval_kind !== "mcp_tool_call"
-    || meta?.codex_request_type !== "approval_request"
-    || meta?.connector_id !== "browser-use"
-    || meta?.tool_name !== "access_browser_origin"
-    || toolParams?.origin !== origin
-    || schema?.type !== "object"
-    || properties === undefined
-    || Object.keys(properties).length !== 0
-  ) return undefined;
-
-  return { action: "accept", content: {} };
+  if (typeof origin !== "string" || !approvedOrigins.includes(origin)) return undefined;
+  if (!matches(meta, {
+    codex_approval_kind: "mcp_tool_call",
+    codex_request_type: "approval_request",
+    connector_id: "browser-use",
+    tool_name: "access_browser_origin",
+    origin,
+  })) return undefined;
+  if (!matches(record(meta?.tool_params), { origin }) || !matches(schema, { type: "object" })) return undefined;
+  const properties = record(schema?.properties);
+  return properties !== undefined && Object.keys(properties).length === 0
+    ? { action: "accept", content: {} }
+    : undefined;
 }
 
 export async function resolveElicitation(
