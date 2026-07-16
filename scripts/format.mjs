@@ -1,28 +1,13 @@
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { extname, join, relative } from "node:path";
+import { extname, relative } from "node:path";
+
+import { collectFiles } from "./files.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const checkOnly = process.argv.includes("--check");
 const supportedExtensions = new Set([".json", ".md", ".mjs", ".ts", ".yaml", ".yml"]);
-const ignoredDirectories = new Set([".astro", ".git", "dist", "node_modules"]);
-
-async function collect(directory) {
-  const entries = await readdir(directory, { withFileTypes: true });
-  const files = [];
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      if (!ignoredDirectories.has(entry.name)) {
-        files.push(...(await collect(join(directory, entry.name))));
-      }
-      continue;
-    }
-    if (supportedExtensions.has(extname(entry.name))) {
-      files.push(join(directory, entry.name));
-    }
-  }
-  return files;
-}
+const ignoredDirectories = new Set([".astro", ".git", ".tmp-comment-check", "dist", "node_modules"]);
 
 function normalize(path, source) {
   let formatted = source.replace(/\r\n?/g, "\n");
@@ -39,7 +24,7 @@ function normalize(path, source) {
 }
 
 const changed = [];
-for (const path of (await collect(root)).sort()) {
+for (const path of (await collectFiles(root, ignoredDirectories, supportedExtensions)).sort()) {
   const source = await readFile(path, "utf8");
   const formatted = normalize(path, source);
   if (source !== formatted) {

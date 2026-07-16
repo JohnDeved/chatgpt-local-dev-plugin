@@ -1,5 +1,8 @@
-import { lstat, readdir, realpath, stat } from "node:fs/promises";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { basename, isAbsolute, resolve } from "node:path";
+
+import { isPathInside } from "../path.js";
 
 const IGNORED = new Set([
   ".git",
@@ -14,11 +17,8 @@ const IGNORED = new Set([
 ]);
 const MAX_VISITED = 4096;
 const MAX_DEPTH = 4;
+const MAX_METADATA_BYTES = 64 * 1024;
 
-function inside(root: string, candidate: string): boolean {
-  const path = relative(root, candidate);
-  return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
-}
 
 async function validatedDirectory(root: string, candidate: string): Promise<string | undefined> {
   try {
@@ -26,10 +26,51 @@ async function validatedDirectory(root: string, candidate: string): Promise<stri
     const info = await lstat(candidate);
     if (info.isSymbolicLink() || !info.isDirectory()) return undefined;
     const candidateReal = await realpath(candidate);
-    return inside(rootReal, candidateReal) ? candidateReal : undefined;
+    return isPathInside(rootReal, candidateReal) ? candidateReal : undefined;
   } catch {
     return undefined;
   }
+}
+
+async function boundedText(path: string): Promise<string | undefined> {
+  try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size > MAX_METADATA_BYTES) return undefined;
+    return await readFile(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+function remoteName(url: string): string | undefined {
+  const normalized = url.trim().replace(/\/+$/u, "").replace(/\.git$/iu, "");
+  const name = normalized.split(/[/:]/u).at(-1)?.trim();
+  return name && name !== "." ? name : undefined;
+}
+
+async function projectNames(path: string, entries?: Dirent[]): Promise<string[]> {
+  const names = new Set<string>([basename(path)]);
+  const hasPackage = entries === undefined || entries.some((entry) => entry.name === "package.json" && entry.isFile());
+  const hasGit = entries === undefined || entries.some((entry) => entry.name === ".git" && entry.isDirectory());
+  if (hasPackage) {
+    const source = await boundedText(resolve(path, "package.json"));
+    if (source !== undefined) {
+      try {
+        const name = (JSON.parse(source) as { name?: unknown }).name;
+        if (typeof name === "string" && name.trim()) names.add(name.trim());
+      } catch {
+        // Invalid package metadata does not prevent directory-name discovery.
+      }
+    }
+  }
+  if (hasGit) {
+    const source = await boundedText(resolve(path, ".git", "config"));
+    for (const match of source?.matchAll(/^\s*url\s*=\s*(.+?)\s*$/gmu) ?? []) {
+      const name = remoteName(match[1] ?? "");
+      if (name !== undefined) names.add(name);
+    }
+  }
+  return [...names];
 }
 
 export async function resolveProject(query: string, roots: string[]): Promise<string[]> {
@@ -54,14 +95,15 @@ export async function resolveProject(query: string, roots: string[]): Promise<st
       const current = queue.shift();
       if (current === undefined) break;
       visited += 1;
-      if (basename(current.path).toLowerCase().includes(needle)) matches.add(current.path);
-      if (current.depth >= MAX_DEPTH) continue;
-      let entries;
+      let entries: Dirent[];
       try {
         entries = await readdir(current.path, { withFileTypes: true });
       } catch {
-        continue;
+        entries = [];
       }
+      const names = await projectNames(current.path, entries);
+      if (names.some((name) => name.toLowerCase().includes(needle))) matches.add(current.path);
+      if (current.depth >= MAX_DEPTH) continue;
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.isSymbolicLink() || IGNORED.has(entry.name)) continue;
         queue.push({ path: resolve(current.path, entry.name), depth: current.depth + 1 });
@@ -69,12 +111,4 @@ export async function resolveProject(query: string, roots: string[]): Promise<st
     }
   }
   return [...matches].sort();
-}
-
-export async function directoryExists(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isDirectory();
-  } catch {
-    return false;
-  }
 }

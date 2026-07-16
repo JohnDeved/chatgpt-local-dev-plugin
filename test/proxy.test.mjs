@@ -140,8 +140,10 @@ test("inlines allowlisted local image paths from downstream results", async () =
         independentlyUsable: true,
       },
     }]);
-    assert.equal(entries[0].tool._meta.ui.resourceUri, "ui://widget/local-dev-media-v1.html");
-    assert.equal(entries[0].tool._meta["openai/outputTemplate"], "ui://widget/local-dev-media-v1.html");
+    assert.equal(entries[0].tool._meta.ui, undefined);
+    assert.equal(entries[0].tool._meta["openai/outputTemplate"], undefined);
+    assert.equal(typeof entries[0].tool._meta["openai/toolInvocation/invoking"], "string");
+    assert.equal(typeof entries[0].tool._meta["openai/toolInvocation/invoked"], "string");
     const result = await entries[0].call({});
     assert.equal(result.content[0].text, imagePath);
     assert.deepEqual(result.content[1], {

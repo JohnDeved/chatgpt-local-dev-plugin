@@ -6,9 +6,9 @@ import { CallToolResultSchema, type CallToolResult, type Tool } from "@modelcont
 
 import type { HttpMcpServer, ResolvedSelectedServer, StdioMcpServer } from "./config/types.js";
 import { inlineLocalMedia } from "./media.js";
-import { attachMediaViewer } from "./media-viewer.js";
 import { failure } from "./result.js";
 import type { RegistryEntry } from "./registry.js";
+import { prepareProxiedTool } from "./tool-metadata.js";
 
 interface Connection {
   client: Client;
@@ -82,7 +82,7 @@ async function connectSelected(selection: ResolvedSelectedServer): Promise<Conne
       ? inlineMedia
       : undefined;
     return {
-      tool: { ...(mediaConfiguration === undefined ? tool : attachMediaViewer(tool)), name: exposedName },
+      tool: prepareProxiedTool({ ...tool, name: exposedName }),
       call: async (arguments_) => {
         try {
           const result = await client.callTool(

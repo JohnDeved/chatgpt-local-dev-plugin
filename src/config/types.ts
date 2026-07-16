@@ -1,3 +1,5 @@
+import type { JsonValue } from "../types.js";
+
 export type ApprovalMode = "auto" | "prompt" | "writes" | "approve";
 
 export interface ToolPolicy {
@@ -56,11 +58,18 @@ export interface ProjectOpenHook {
   argv: string[];
 }
 
+export interface ProjectBinding {
+  server: string;
+  tool: string;
+  arguments: { [key: string]: JsonValue };
+}
+
 export interface LocalDevConfig {
   version: 1;
   projectRoots: string[];
   selectedServers: SelectedServer[];
   projectOpenHooks: ProjectOpenHook[];
+  projectBindings: ProjectBinding[];
 }
 
 export interface ResolvedSelectedServer {

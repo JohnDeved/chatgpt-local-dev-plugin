@@ -1,18 +1,14 @@
 import { open, realpath } from "node:fs/promises";
-import { isAbsolute, relative, sep } from "node:path";
+import { isAbsolute } from "node:path";
 
 import type { CallToolResult, ContentBlock } from "@modelcontextprotocol/sdk/types.js";
 
 import type { InlineMediaConfig } from "./config/types.js";
+import { isPathInside } from "./path.js";
 
 interface DetectedMedia {
   type: "audio" | "image";
   mimeType: string;
-}
-
-function inside(root: string, candidate: string): boolean {
-  const path = relative(root, candidate);
-  return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
 }
 
 function ascii(data: Buffer, start: number, end: number): string {
@@ -58,7 +54,7 @@ async function resolvedRoots(roots: string[]): Promise<string[]> {
 async function mediaBlock(path: string, roots: string[], maxBytes: number): Promise<ContentBlock | undefined> {
   if (!isAbsolute(path) || path.includes("\n") || path.includes("\r")) return undefined;
   const resolved = await realpath(path).catch(() => undefined);
-  if (resolved === undefined || !roots.some((root) => inside(root, resolved))) return undefined;
+  if (resolved === undefined || !roots.some((root) => isPathInside(root, resolved))) return undefined;
   const handle = await open(resolved, "r").catch(() => undefined);
   if (handle === undefined) return undefined;
   try {

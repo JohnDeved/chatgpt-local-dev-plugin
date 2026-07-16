@@ -13,7 +13,7 @@ The owner explicitly waived the unfinished long-running compatibility rows after
 
 ## Core server
 
-The package targets macOS with Node `22.16.0`.
+The package targets macOS with Node `24.18.0`.
 
 ```sh
 nvm install
@@ -26,25 +26,25 @@ npm start
 
 `npm run check` is the exact repository-wide check. The automated integration tests start the stdio server with temporary home directories and no credentials, browser, service, tunnel, or user configuration.
 
-The production server exposes exactly five native tools:
+The production server exposes seven native tools:
 
 - `project.open`
 - `project.current`
 - `dev.run`
+- `dev.batch`
 - `dev.poll`
 - `dev.stop`
+- `dev.diff`
 
-It reads the shared Codex MCP registry from `~/.codex/config.toml` without modifying it. Local-only project roots, selected downstream server aliases, optional allowlisted local-media inlining, and argv-based project hooks live in `~/.local-dev/config.json`; see [`docs/configuration.md`](./docs/configuration.md). Selected stdio and Streamable HTTP servers are discovered with pagination, filtered using the Codex settings, namespaced as `<alias>.<tool>`, and forwarded generically.
+`project.open` automatically resolves an existing project or creates a durable or temporary project when requested. Temporary projects are removed when the Local Dev runtime closes.
 
-## Call dashboard
+`dev.run` rejects shell-evaluation flags, supports a validated relative `cwd`, returns retained output for nonzero exits and timeouts, and requires `allowNonZero: true` when a nonzero status is expected. `dev.batch` runs two to twenty foreground argv commands sequentially without a shell.
 
-While the tunnel runtime is running, open the private local dashboard with:
+It reads the shared Codex MCP registry from `~/.codex/config.toml` without modifying it. Local-only project roots, selected downstream server aliases, optional allowlisted local-media inlining, argv-based project hooks, and generic downstream project bindings live in `~/.local-dev/config.json`; see [`docs/configuration.md`](./docs/configuration.md). Selected stdio and Streamable HTTP servers are discovered with pagination, filtered using the Codex settings, namespaced as `<alias>.<tool>`, and forwarded generically.
 
-```sh
-local-dev dashboard
-```
+## ChatGPT tool activity
 
-The dashboard shows native and proxied MCP calls live, including the exact tool name, server alias, redacted arguments, status, duration, bounded result data, and image/audio metadata. It listens only on an ephemeral `127.0.0.1` port behind a random per-runtime URL token; the URL is stored locally with user-only permissions. Calls are held in a 200-entry in-memory ring and are never persisted to a database. Credential-like fields and base64 media bytes are redacted. See [`docs/dashboard.md`](./docs/dashboard.md).
+Local Dev is a tool-only MCP server. It does not expose dashboards, MCP Apps resources, embedded widgets, project pickers, question forms, media viewers, or observability tools. Native and proxied tools provide concise `openai/toolInvocation/invoking` and `openai/toolInvocation/invoked` status metadata so ChatGPT can show command activity in its standard tool UI. Any downstream embedded-UI metadata is stripped while non-UI metadata, schemas, annotations, and tool results are preserved.
 
 ## Set up
 

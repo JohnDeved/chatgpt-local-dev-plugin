@@ -68,9 +68,10 @@ async function fixture({ hook = false, proxy = false } = {}) {
   await mkdir(join(home, ".codex"), { recursive: true });
   await mkdir(join(home, ".local-dev"), { recursive: true });
   await mkdir(project, { recursive: true });
+  await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo-project" }), "utf8");
   const fakeServer = new URL("./fake-mcp-server.mjs", import.meta.url).pathname;
   const codexConfig = proxy
-    ? `[mcp_servers.fake]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(fakeServer)}]\nenabled_tools = ["echo", "blocked"]\ndisabled_tools = ["blocked"]\nrequired = true\n`
+    ? `[mcp_servers.fake]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(fakeServer)}]\nenabled_tools = ["echo", "activate_project", "blocked"]\ndisabled_tools = ["blocked"]\nrequired = true\n`
     : "# empty MCP registry\n";
   await writeFile(join(home, ".codex", "config.toml"), codexConfig, "utf8");
   const marker = join(project, "hook-ran");
@@ -82,6 +83,7 @@ async function fixture({ hook = false, proxy = false } = {}) {
       projectRoot: project,
       argv: [process.execPath, "-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ok')`],
     }] : [],
+    projectBindings: proxy ? [{ server: "fixture", tool: "activate_project", arguments: { project: "${projectPath}" } }] : [],
   }), "utf8");
   return { home, marker, project };
 }
@@ -96,35 +98,36 @@ async function initialize(client) {
   return response;
 }
 
-test("production stdio server exposes exactly five core tools", async () => {
+test("production stdio server exposes tool-only native tools with ChatGPT statuses", async () => {
   const { home } = await fixture();
   const client = new McpProcess({ ...process.env, HOME: home });
   try {
     const initialized = await initialize(client);
     assert.deepEqual(initialized.result.serverInfo, { name: "local-dev", version: "0.3.0" });
-    assert.deepEqual(initialized.result.capabilities.resources, {});
-    const resources = await client.request("resources/list", {});
-    assert.equal(resources.result.resources[0].uri, "ui://widget/local-dev-media-v1.html");
-    const viewer = await client.request("resources/read", { uri: "ui://widget/local-dev-media-v1.html" });
-    assert.equal(viewer.result.contents[0].mimeType, "text/html;profile=mcp-app");
-    assert.match(viewer.result.contents[0].text, /ui\/notifications\/tool-result/u);
+    assert.equal("resources" in initialized.result.capabilities, false);
     const listed = await client.request("tools/list", {});
     assert.deepEqual(listed.result.tools.map(({ name }) => name), [
       "project.open",
       "project.current",
       "dev.run",
+      "dev.batch",
       "dev.poll",
       "dev.stop",
+      "dev.diff",
     ]);
     for (const tool of listed.result.tools) {
       assert.equal(typeof tool.annotations.readOnlyHint, "boolean");
       assert.equal(tool.annotations.openWorldHint, false);
       assert.ok(tool.outputSchema);
+      assert.equal(typeof tool._meta["openai/toolInvocation/invoking"], "string");
+      assert.equal(typeof tool._meta["openai/toolInvocation/invoked"], "string");
+      assert.ok(tool._meta["openai/toolInvocation/invoking"].length <= 64);
+      assert.ok(tool._meta["openai/toolInvocation/invoked"].length <= 64);
+      assert.equal(tool._meta.ui, undefined);
+      assert.equal(tool._meta["openai/outputTemplate"], undefined);
     }
-    await client.request("tools/call", { name: "project.current", arguments: {} });
-    const dashboardUrl = (await readFile(join(home, ".local-dev", "dashboard.url"), "utf8")).trim();
-    const dashboardCalls = await fetch(new URL("api/calls", dashboardUrl)).then((response) => response.json());
-    assert.equal(dashboardCalls[0].tool, "project.current");
+    const current = await client.request("tools/call", { name: "project.current", arguments: {} });
+    assert.equal(current.result.structuredContent.data.path, null);
     assert.equal(client.stderr, "");
   } finally {
     client.close();
@@ -148,6 +151,59 @@ test("opens a configured project and runs argv without a shell", async () => {
     assert.equal(run.result.structuredContent.ok, true);
     assert.equal(run.result.structuredContent.data.exitCode, 0);
     assert.equal(run.result.structuredContent.data.outputTail, "core-ok");
+    assert.deepEqual(run.result.structuredContent.data.argv, [process.execPath, "-e", "process.stdout.write('core-ok')"]);
+    assert.equal(run.result.structuredContent.data.cwd, await realpath(project));
+    assert.equal(run.result.structuredContent.data.background, false);
+    assert.equal(typeof run.result.structuredContent.data.startedAt, "string");
+    assert.equal(typeof run.result.structuredContent.data.finishedAt, "string");
+    assert.equal(new Date(run.result.structuredContent.data.finishedAt) >= new Date(run.result.structuredContent.data.startedAt), true);
+    const nested = join(project, "packages", "web");
+    await mkdir(nested, { recursive: true });
+    const nestedRun = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: { argv: [process.execPath, "-e", "process.stdout.write(process.cwd())"], cwd: "packages/web" },
+    });
+    assert.equal(nestedRun.result.structuredContent.data.outputTail, await realpath(nested));
+    const escapedCwd = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: { argv: [process.execPath, "--version"], cwd: "../" },
+    });
+    assert.equal(escapedCwd.result.structuredContent.error.code, "INVALID_CWD");
+    const nonzero = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: { argv: [process.execPath, "-e", "process.stderr.write('failed');process.exit(7)"] },
+    });
+    assert.equal(nonzero.result.structuredContent.error.code, "COMMAND_EXIT_NONZERO");
+    assert.equal(nonzero.result.structuredContent.data.exitCode, 7);
+    assert.equal(nonzero.result.structuredContent.data.outputTail, "failed");
+    const allowedNonzero = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: { argv: [process.execPath, "-e", "process.exit(3)"], allowNonZero: true },
+    });
+    assert.equal(allowedNonzero.result.structuredContent.ok, true);
+    assert.equal(allowedNonzero.result.structuredContent.data.exitCode, 3);
+    const timedOut = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: { argv: [process.execPath, "-e", "process.stdout.write('before-timeout');setInterval(()=>{},1000)"], timeoutMs: 100 },
+    });
+    assert.equal(timedOut.result.structuredContent.error.code, "COMMAND_TIMEOUT");
+    assert.match(timedOut.result.structuredContent.data.outputTail, /before-timeout/u);
+    const shell = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: { argv: ["sh", "-c", "echo forbidden"] },
+    });
+    assert.equal(shell.result.structuredContent.error.code, "INVALID_SHELL");
+    const batch = await client.request("tools/call", {
+      name: "dev.batch",
+      arguments: {
+        steps: [
+          { argv: [process.execPath, "-e", "process.stdout.write('one')"] },
+          { argv: [process.execPath, "-e", "process.stdout.write('two')"], cwd: "packages/web" },
+        ],
+      },
+    });
+    assert.equal(batch.result.structuredContent.ok, true);
+    assert.equal(batch.result.structuredContent.data.steps.length, 2);
     const missing = await client.request("tools/call", {
       name: "dev.run",
       arguments: { argv: [join(home, "does-not-exist")] },
@@ -181,6 +237,26 @@ test("runs argv-based project hooks before activating a project", async () => {
   }
 });
 
+test("synchronizes configured downstream project bindings", async () => {
+  const { home, project } = await fixture({ proxy: true });
+  const client = new McpProcess({ ...process.env, HOME: home });
+  try {
+    await initialize(client);
+    const opened = await client.request("tools/call", { name: "project.open", arguments: { query: "demo" } });
+    assert.equal(opened.result.structuredContent.ok, true);
+    assert.equal(opened.result.structuredContent.data.bindingWarnings, 0);
+    assert.deepEqual(opened.result.structuredContent.data.bindings, [{
+      server: "fixture",
+      tool: "activate_project",
+      status: "ok",
+      message: `active=${await realpath(project)}`,
+    }]);
+  } finally {
+    client.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("tracks one background process, detects loopback URLs, and stops it", async () => {
   const { home } = await fixture();
   const client = new McpProcess({ ...process.env, HOME: home });
@@ -195,8 +271,12 @@ test("tracks one background process, detects loopback URLs, and stops it", async
       },
     });
     assert.equal(started.result.structuredContent.data.state, "running");
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const polled = await client.request("tools/call", { name: "dev.poll", arguments: {} });
+    let polled;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      polled = await client.request("tools/call", { name: "dev.poll", arguments: {} });
+      if (polled.result.structuredContent.data.urls.length > 0) break;
+    }
     assert.deepEqual(polled.result.structuredContent.data.urls, ["http://127.0.0.1:4321/ready"]);
     const busy = await client.request("tools/call", {
       name: "dev.run",
@@ -211,7 +291,7 @@ test("tracks one background process, detects loopback URLs, and stops it", async
   }
 });
 
-test("paginates, filters, namespaces, preserves, and forwards downstream tools", async () => {
+test("paginates, filters, namespaces, sanitizes, and forwards downstream tools", async () => {
   const { home } = await fixture({ proxy: true });
   const client = new McpProcess({ ...process.env, HOME: home });
   try {
@@ -224,7 +304,11 @@ test("paginates, filters, namespaces, preserves, and forwards downstream tools",
     assert.deepEqual(downstream.inputSchema.required, ["value"]);
     assert.deepEqual(downstream.outputSchema.required, ["echoed"]);
     assert.deepEqual(downstream.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
-    assert.deepEqual(downstream._meta, { fixture: true });
+    assert.equal(downstream._meta.fixture, true);
+    assert.equal(downstream._meta.ui, undefined);
+    assert.equal(downstream._meta["openai/outputTemplate"], undefined);
+    assert.equal(typeof downstream._meta["openai/toolInvocation/invoking"], "string");
+    assert.equal(typeof downstream._meta["openai/toolInvocation/invoked"], "string");
     const called = await client.request("tools/call", { name: "fixture.echo", arguments: { value: "proxied" } });
     assert.equal(called.result.content[0].text, "echo=proxied");
     assert.deepEqual(called.result.structuredContent, { echoed: "proxied" });

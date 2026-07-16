@@ -1,34 +1,19 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { extname, join, relative } from "node:path";
+import { relative } from "node:path";
+
+import { collectFiles } from "./files.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const ignoredDirectories = new Set([".astro", ".git", "dist", "node_modules"]);
 const sourceExtensions = new Set([".mjs", ".ts"]);
 const violations = [];
 
-async function collect(directory) {
-  const entries = await readdir(directory, { withFileTypes: true });
-  const files = [];
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      if (!ignoredDirectories.has(entry.name)) {
-        files.push(...(await collect(join(directory, entry.name))));
-      }
-      continue;
-    }
-    if (sourceExtensions.has(extname(entry.name))) {
-      files.push(join(directory, entry.name));
-    }
-  }
-  return files;
-}
-
 function report(path, rule, detail) {
   violations.push(`${relative(root, path)}: ${rule}: ${detail}`);
 }
 
-for (const path of await collect(root)) {
+for (const path of await collectFiles(root, ignoredDirectories, sourceExtensions)) {
   const source = await readFile(path, "utf8");
   if (source.includes("\t")) {
     report(path, "no-tabs", "tabs are not allowed");
@@ -40,6 +25,7 @@ for (const path of await collect(root)) {
   if (relative(root, path).startsWith("src/")) {
     const prohibitedModules = [
       "node:dgram",
+      "node:http",
       "node:https",
       "node:net",
       "node:tls",
@@ -51,25 +37,13 @@ for (const path of await collect(root)) {
       }
     }
     if (
-      source.includes('"node:http"') &&
-      relative(root, path) !== "src/dashboard.ts"
-    ) {
-      report(path, "http-boundary", "node:http is restricted to the loopback dashboard");
-    }
-    if (
-      relative(root, path) === "src/dashboard.ts" &&
-      (!source.includes('server.listen(0, "127.0.0.1"') || !source.includes("randomBytes(24)"))
-    ) {
-      report(path, "loopback-dashboard", "dashboard must bind an ephemeral loopback port behind a random URL token");
-    }
-    if (
       source.includes('"node:child_process"') &&
-      !["src/core/process.ts", "src/setup/command.ts"].includes(relative(root, path))
+      !["src/core/command.ts", "src/setup/command.ts"].includes(relative(root, path))
     ) {
-      report(path, "child-process-boundary", "child_process is restricted to core/process.ts");
+      report(path, "child-process-boundary", "child_process is restricted to command boundary modules");
     }
     if (
-      ["src/core/process.ts", "src/setup/command.ts"].includes(relative(root, path)) &&
+      ["src/core/command.ts", "src/setup/command.ts"].includes(relative(root, path)) &&
       (!source.includes("shell: false") || !source.includes("spawn("))
     ) {
       report(path, "no-shell-strings", "process execution must use spawn with shell: false");
@@ -92,12 +66,12 @@ const expectedDependencies = {
 if (JSON.stringify(packageJson.dependencies) !== JSON.stringify(expectedDependencies)) {
   violations.push("package.json: runtime-dependencies: dependency set or exact versions changed");
 }
-const expectedDevDependencies = { "@types/node": "22.20.1", typescript: "5.8.3" };
+const expectedDevDependencies = { "@types/node": "24.13.3", typescript: "5.8.3" };
 if (JSON.stringify(packageJson.devDependencies) !== JSON.stringify(expectedDevDependencies)) {
   violations.push("package.json: dev-dependencies: dependency set or exact versions changed");
 }
-if (packageJson.engines?.node !== ">=22.16.0 <23.0.0") {
-  violations.push("package.json: node-range: expected >=22.16.0 <23.0.0");
+if (packageJson.engines?.node !== ">=24.18.0 <25.0.0") {
+  violations.push("package.json: node-range: expected >=24.18.0 <25.0.0");
 }
 
 if (violations.length > 0) {

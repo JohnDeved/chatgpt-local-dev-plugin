@@ -9,7 +9,7 @@ ChatGPT Developer Mode
   → OpenAI Secure MCP Tunnel
   → tunnel-client user service
   → Local Dev stdio MCP server
-      ├── five native development tools
+      ├── eleven native development tools
       └── selected MCP servers from ~/.codex/config.toml
 ```
 
@@ -37,7 +37,7 @@ The repository owner explicitly directed implementation to continue before every
 
 ### Implementation status (2026-07-13)
 
-Phases 2-5 are implemented. The production server now loads the shared Codex registry read-only, exposes the five native tools, manages one bounded background process, runs argv-only project hooks, and generically proxies selected stdio and Streamable HTTP MCP tools with pagination, inherited filters, aliases, metadata preservation, and required/optional availability behavior. The three-command setup surface performs verified dependency installation, previewed and reversible configuration, direct smoke testing, native tunnel connection/readiness checks, macOS login auto-start, status/repair, uninstall, and the ChatGPT handoff. Temporary-home and fake-server tests require no credentials, tunnel, browser, service, or user configuration.
+Phases 2-5 are implemented. The production server now loads the shared Codex registry read-only, exposes eleven native tools, manages one bounded background process, runs argv-only project hooks, synchronizes generic configured downstream project bindings, and generically proxies selected stdio and Streamable HTTP MCP tools with pagination, inherited filters, aliases, metadata preservation, and required/optional availability behavior. The three-command setup surface performs verified dependency installation, previewed and reversible configuration, direct smoke testing, native tunnel connection/readiness checks, macOS login auto-start, status/repair, uninstall, and the ChatGPT handoff. Temporary-home and fake-server tests require no credentials, tunnel, browser, service, or user configuration.
 
 The temporary Phase 1 `ping` tool is intentionally absent from production. Phase 5 therefore proves the same local readiness property with a direct MCP initialize/list/`project.current` smoke call, then separately requires native tunnel `process_running`, `/healthz`, and `/readyz` success. This preserves direct request/response behavior without retaining a sixth custom tool.
 
@@ -55,19 +55,21 @@ Skip Codex-managed OAuth or ChatGPT-session-authenticated servers unless indepen
 
 ## Native tools
 
-Expose exactly five custom tools:
+Expose seven native tools:
 
-- `project.open({ query })`: resolve a validated path or search configured roots; activate project hooks.
-- `project.current()`: return the active project.
-- `dev.run({ argv, background?, timeoutMs? })`: execute an argument array with `shell: false`; bound output and allow one background process.
+- `project.open({ query, onMissing? })`: resolve an existing project, or create a durable or temporary project, run argv-only hooks, synchronize generic downstream project bindings, and activate it.
+- `project.current()`: return the active project path and kind.
+- `dev.run({ argv, background?, timeoutMs?, cwd?, allowNonZero? })`: execute one argument array with `shell: false`, safe relative working-directory resolution, bounded output, and explicit nonzero handling.
+- `dev.batch({ steps, stopOnError? })`: execute two to twenty foreground argv commands sequentially without shell evaluation.
 - `dev.poll()`: return background state, exit code, output tail, and detected loopback URLs.
 - `dev.stop()`: stop and clear the background process.
+- `dev.diff()`: return one cumulative, bounded working-tree summary.
 
-Project discovery avoids symlinks, ignored directories, unrestricted traversal, and switching while a background process runs. Commands run with the local user’s permissions; RTK may be preferred when available.
+Project discovery avoids symlinks, ignored directories, unrestricted traversal, and switching while a background process runs. Commands run with the local user’s permissions. Shell-interpreter evaluation flags are rejected, command working directories must remain inside the active project, and RTK may be preferred when available.
 
 ## Downstream MCP proxy
 
-For each selected Codex MCP entry, connect, fetch all `tools/list` pages, apply inherited filters, namespace tools as `<alias>.<tool>`, preserve metadata, and forward calls generically.
+For each selected Codex MCP entry, connect, fetch all `tools/list` pages, apply inherited filters, namespace tools as `<alias>.<tool>`, strip embedded-UI metadata, preserve non-UI metadata and annotations, add native invocation status text, and forward calls generically.
 
 Adding or changing an MCP server happens in the shared Codex config, followed by a Local Dev restart and plugin refresh. Serena command tools remain disabled because `dev.run` owns execution. Image-only tools stay out of version one.
 
@@ -157,7 +159,7 @@ The project is complete when:
 - tool results return directly without model-driven polling;
 - Codex, ChatGPT desktop, and Local Dev use one MCP registry;
 - selected downstream tools are exposed without server-specific code;
-- only the five native tools are custom;
+- the eleven native tools remain small, bounded, and server-agnostic;
 - Local Dev and `tunnel-client` start automatically;
 - config, project, command, proxy, reconnect, setup, and security cases are tested;
 - the complete coding/browser workflow passes after reboot, unless the repository owner explicitly waives that disruptive validation for the implementation run; the 2026-07-13 run carries such a waiver and does not claim a reboot pass;

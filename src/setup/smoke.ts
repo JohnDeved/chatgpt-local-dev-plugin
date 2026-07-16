@@ -3,11 +3,11 @@ import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotoc
 
 const CORE_TOOLS = ["project.open", "project.current", "dev.run", "dev.poll", "dev.stop"];
 
-export async function smokeServer(home: string, nodePath: string, cliPath: string): Promise<void> {
+export async function smokeServer(home: string, nodePath: string, serverPath: string): Promise<void> {
   const transport = new StdioClientTransport({
     command: nodePath,
-    args: [cliPath],
-    env: { ...getDefaultEnvironment(), HOME: home, LOCAL_DEV_DASHBOARD: "0" },
+    args: [serverPath],
+    env: { ...getDefaultEnvironment(), HOME: home },
     stderr: "pipe",
   });
   transport.stderr?.on("data", () => undefined);
