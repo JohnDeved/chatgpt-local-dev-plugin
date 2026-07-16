@@ -40,7 +40,7 @@ export async function runServer(): Promise<void> {
   server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
     const entry = registry.get(params.name);
     if (entry === undefined) return failure(params.name, "UNKNOWN_TOOL", "The requested tool is not registered.") as never;
-    return await entry.call(params.arguments ?? {});
+    return await entry.call(params.arguments ?? {}, params._meta);
   });
   const transport = new StdioServerTransport();
 

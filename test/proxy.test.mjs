@@ -21,12 +21,16 @@ const common = {
 
 test("connects and forwards over Streamable HTTP with environment-backed headers", async () => {
   const requests = [];
+  let callMeta;
   const createDownstream = () => {
     const downstream = new Server({ name: "http-fixture", version: "1.0.0" }, { capabilities: { tools: {} } });
     downstream.setRequestHandler(ListToolsRequestSchema, () => ({
       tools: [{ name: "read", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } }],
     }));
-    downstream.setRequestHandler(CallToolRequestSchema, () => ({ content: [{ type: "text", text: "http-ok" }] }));
+    downstream.setRequestHandler(CallToolRequestSchema, ({ params }) => {
+      callMeta = params._meta;
+      return { content: [{ type: "text", text: "http-ok" }] };
+    });
     return downstream;
   };
   const http = createServer((request, response) => {
@@ -67,8 +71,10 @@ test("connects and forwards over Streamable HTTP with environment-backed headers
       },
     }]);
     assert.deepEqual(entries.map(({ tool }) => tool.name), ["http.read"]);
-    const result = await entries[0].call({});
+    const meta = { "x-codex-turn-metadata": { session_id: "session", turn_id: "turn" } };
+    const result = await entries[0].call({}, meta);
     assert.equal(result.content[0].text, "http-ok");
+    assert.deepEqual(callMeta, meta);
   } finally {
     await proxy.close();
     await new Promise((resolve) => http.close(resolve));

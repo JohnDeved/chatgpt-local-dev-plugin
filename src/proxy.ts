@@ -83,10 +83,10 @@ async function connectSelected(selection: ResolvedSelectedServer): Promise<Conne
       : undefined;
     return {
       tool: prepareProxiedTool({ ...tool, name: exposedName }, { serverId: server.id, alias, sourceName: tool.name }),
-      call: async (arguments_) => {
+      call: async (arguments_, meta) => {
         try {
           const result = await client.callTool(
-            { name: tool.name, arguments: arguments_ },
+            { name: tool.name, arguments: arguments_, ...(meta === undefined ? {} : { _meta: meta }) },
             CallToolResultSchema,
             { timeout: server.toolTimeoutMs },
           ) as CallToolResult;
