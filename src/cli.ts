@@ -4,6 +4,7 @@ import { createInterface } from "node:readline/promises";
 
 import { runServer } from "./server.js";
 import { readSetupStatus, runSetup, uninstall, type SetupOptions } from "./setup/index.js";
+import { runWatchdog } from "./setup/watchdog.js";
 
 function help(): void {
   process.stdout.write(`Local Dev
@@ -11,6 +12,7 @@ function help(): void {
 Usage:
   local-dev setup [advanced options]
   local-dev status [--json]
+  local-dev watchdog
   local-dev uninstall [--yes]
 
 The no-argument form starts the stdio MCP server for tunnel-client.
@@ -124,6 +126,10 @@ async function main(): Promise<void> {
     }
     if (!status.ready) process.exitCode = 1;
     return;
+  }
+  if (command === "watchdog") {
+    if (args.length !== 0) throw new Error("UNKNOWN_OPTION");
+    await runWatchdog();
   }
   if (command === "uninstall") {
     if (args.some((argument) => argument !== "--yes")) throw new Error("UNKNOWN_OPTION");

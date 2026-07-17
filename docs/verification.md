@@ -12,7 +12,7 @@ This file separates automated coverage, real-environment evidence, and evidence 
 
 - [x] `local-dev setup` reused the existing native tunnel runtime and stored runtime-key reference without reading or copying a literal key.
 - [x] Native tunnel status reported `process_running`, `healthy`, and `ready`; `/healthz` was live and `/readyz` was ready. Control-plane polling remained separately reported as `unknown` because the native status had no live admin UI snapshot.
-- [x] The macOS LaunchAgent was loaded, invokes native `tunnel-client runtimes connect` rather than supervising the daemon itself, and schedules the idempotent connect-or-reuse command every 60 seconds so an exited runtime is recreated automatically.
+- [x] The macOS LaunchAgent was loaded as a persistent `local-dev watchdog` under `/usr/bin/caffeinate -s`; it permits display lock, prevents AC idle sleep, reconnects an unhealthy runtime, and force-recycles the runtime after a detected sleep/wake gap.
 - [x] `local-dev status` passed its direct MCP discovery/call smoke test and reported ready.
 - [x] The shared registry selected pinned Serena 1.5.3 and Chrome DevTools MCP 1.5.0 entries with explicit allowlists. The production Local Dev registry exposed five native tools, 20 namespaced Serena tools with shell execution absent, and three namespaced Chrome slim tools.
 - [x] Through the combined registry, `project.open` activated the repository, Serena edited `README.md`, and `dev.run` ran the complete 17-test repository gate successfully.

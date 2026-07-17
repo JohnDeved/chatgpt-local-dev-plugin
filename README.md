@@ -57,7 +57,7 @@ npm link
 local-dev setup
 ```
 
-Setup is resumable and doubles as repair/reconfiguration. The macOS login service rechecks the managed tunnel every 60 seconds, so an exited runtime is recreated without ChatGPT access. Use `local-dev status` for a concise health report, `local-dev status --json` for automation, and `local-dev uninstall` to remove the login service and Local Dev state without deleting shared Codex MCP entries. See [`docs/setup.md`](./docs/setup.md) for write, backup, tunnel, service, and rollback behavior.
+Setup is resumable and doubles as repair/reconfiguration. The macOS login service runs a persistent tunnel supervisor: display locking remains available, idle system sleep is prevented while on AC power, and a battery/lid sleep is detected after wake so the tunnel runtime is recreated before stale routes can persist. The supervisor also repairs an exited runtime without ChatGPT access. Use `local-dev status` for a concise health report, `local-dev status --json` for automation, and `local-dev uninstall` to remove the login service and Local Dev state without deleting shared Codex MCP entries. See [`docs/setup.md`](./docs/setup.md) for write, backup, tunnel, service, and rollback behavior.
 
 Never commit or paste tunnel or downstream credentials. Use an `env:NAME` or `file:/absolute/path` reference for the runtime key; no public ingress or polling fallback is used.
 

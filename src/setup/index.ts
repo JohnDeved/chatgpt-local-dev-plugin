@@ -11,6 +11,7 @@ import { installTunnelClient } from "./install.js";
 import { setupPaths } from "./paths.js";
 import { installLaunchAgent, launchAgentLoaded, openUrl, removeLaunchAgent } from "./platform.js";
 import { smokeServer } from "./smoke.js";
+import { parseSetupState } from "./state.js";
 import type { RuntimeStatus, SetupOptions, SetupResult, SetupState } from "./types.js";
 
 const TUNNEL_ID = /^tunnel_[A-Za-z0-9_-]+$/u;
@@ -36,6 +37,11 @@ function quoteArgument(value: string): string {
 function mcpCommand(): { command: string; serverPath: string } {
   const serverPath = fileURLToPath(new URL("../server.js", import.meta.url));
   return { command: [process.execPath, serverPath].map(quoteArgument).join(" "), serverPath };
+}
+
+function watchdogCommand(): { args: string[]; program: string } {
+  const watchdogPath = fileURLToPath(new URL("../watchdog-cli.js", import.meta.url));
+  return { program: "/usr/bin/caffeinate", args: ["-s", process.execPath, watchdogPath] };
 }
 
 async function executable(path: string): Promise<boolean> {
@@ -70,24 +76,7 @@ async function findHints(directory: string, depth = 0): Promise<string[]> {
 
 async function readState(path: string): Promise<SetupState | undefined> {
   const source = await readOptional(path);
-  if (source === undefined) return undefined;
-  try {
-    const state = JSON.parse(source) as Partial<SetupState>;
-    if (state.version !== 1 || typeof state.alias !== "string" || typeof state.binaryPath !== "string" ||
-      typeof state.tunnelId !== "string" || typeof state.runtimeKeyRef !== "string" || typeof state.mcpCommand !== "string") return undefined;
-    return {
-      version: 1,
-      alias: state.alias,
-      binaryPath: state.binaryPath,
-      tunnelId: state.tunnelId,
-      runtimeKeyRef: state.runtimeKeyRef,
-      mcpCommand: state.mcpCommand,
-      launchAgentPath: typeof state.launchAgentPath === "string" ? state.launchAgentPath : null,
-      configuredAt: typeof state.configuredAt === "string" ? state.configuredAt : "unknown",
-    };
-  } catch {
-    return undefined;
-  }
+  return source === undefined ? undefined : parseSetupState(source);
 }
 
 async function selectBinary(home: string, options: SetupOptions, previous: SetupState | undefined, prompter: Prompter, reporter: Reporter): Promise<string> {
@@ -265,9 +254,10 @@ export async function runSetup(
     reporter.line(`[${status.control_plane_poll_health?.state === "failed" ? "!" : "✓"}] control-plane polling: ${status.control_plane_poll_health?.state ?? "not separately reported"}`);
 
     if (options.installService !== false) {
-      await installLaunchAgent(paths, binaryPath, connectArgs);
+      const watchdog = watchdogCommand();
+      await installLaunchAgent(paths, watchdog.program, watchdog.args);
       serviceInstalled = true;
-      reporter.line("[✓] macOS login auto-start and 60-second tunnel recovery installed");
+      reporter.line("[✓] macOS tunnel supervisor installed; idle sleep is prevented on AC power and wake recovery is enabled");
     }
     const state: SetupState = {
       version: 1,
