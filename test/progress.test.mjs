@@ -40,9 +40,9 @@ test("creates monotonic best-effort MCP progress notifications", async () => {
 
   assert.deepEqual(
     notifications.map(({ params }) => params.progress),
-    [0, 5, 6, 100],
+    [0, 1, 2, 3],
   );
-  assert.equal(notifications.every(({ params }) => params.total === 100), true);
+  assert.equal(notifications.every(({ params }) => params.total === undefined), true);
   assert.equal(notifications.every(({ params }) => params.progressToken === "request-progress"), true);
   assert.equal(notifications[0].params.message, " Starting   work… ");
   assert.equal(notifications[3].params.message.length, 300);

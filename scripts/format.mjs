@@ -2,12 +2,12 @@ import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { extname, relative } from "node:path";
 
-import { collectFiles } from "./files.mjs";
+import { collectRepositoryFiles as collectFiles } from "./files.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const checkOnly = process.argv.includes("--check");
-const supportedExtensions = new Set([".json", ".md", ".mjs", ".ts", ".yaml", ".yml"]);
-const ignoredDirectories = new Set([".astro", ".git", ".tmp-comment-check", "dist", "node_modules"]);
+const supportedExtensions = new Set([".json", ".md", ".mjs", ".ts", ".tsx", ".css", ".html", ".swift", ".yaml", ".yml"]);
+const ignoredDirectories = new Set([".astro", ".git", ".tmp-comment-check", "dist", "node_modules", ".hutch", "build", "artifacts", "test-results", "playwright-report"]);
 
 function normalize(path, source) {
   let formatted = source.replace(/\r\n?/g, "\n");

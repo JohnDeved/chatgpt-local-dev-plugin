@@ -2,11 +2,11 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { relative } from "node:path";
 
-import { collectFiles } from "./files.mjs";
+import { collectRepositoryFiles as collectFiles } from "./files.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const ignoredDirectories = new Set([".astro", ".git", "dist", "node_modules"]);
-const sourceExtensions = new Set([".mjs", ".ts"]);
+const ignoredDirectories = new Set([".astro", ".git", "dist", "node_modules", ".hutch", "build", "artifacts", "test-results", "playwright-report"]);
+const sourceExtensions = new Set([".mjs", ".ts", ".tsx"]);
 const violations = [];
 
 function report(path, rule, detail) {
@@ -22,6 +22,14 @@ for (const path of await collectFiles(root, ignoredDirectories, sourceExtensions
     report(path, "no-dynamic-code", "dynamic code evaluation is prohibited");
   }
 
+  if (relative(root, path).startsWith("desktop/src/renderer/")) {
+    if (/from\s+["'](?:node:|bun|\.\.\/main\/)/u.test(source)) report(path, "renderer-boundary", "renderer code may not import platform or privileged host modules");
+    if (source.includes("dangerouslySetInnerHTML")) report(path, "untrusted-output", "render tool output as text, not HTML");
+  }
+  if (relative(root, path).startsWith("desktop/src/main/")) {
+    if (/from\s+["']node:(?:http|https|dgram|tls)["']/u.test(source)) report(path, "no-desktop-server", "no application network server belongs in the desktop host");
+    if (source.includes('"node:net"') && relative(root, path) !== "desktop/src/main/service.ts") report(path, "desktop-socket-boundary", "local socket clients belong in the service boundary");
+  }
   if (relative(root, path).startsWith("src/")) {
     const prohibitedModules = [
       "node:dgram",
@@ -32,6 +40,8 @@ for (const path of await collectFiles(root, ignoredDirectories, sourceExtensions
       "node:worker_threads",
     ];
     for (const moduleName of prohibitedModules) {
+      // The activity bridge is the sole owner-only Unix socket; no TCP listener is allowed.
+      if (moduleName === "node:net" && relative(root, path) === "src/activity.ts") continue;
       if (source.includes(`\"${moduleName}\"`) || source.includes(`'${moduleName}'`)) {
         report(path, "no-prohibited-runtime", `import of ${moduleName}`);
       }
@@ -48,7 +58,7 @@ for (const path of await collectFiles(root, ignoredDirectories, sourceExtensions
     ) {
       report(path, "no-shell-strings", "process execution must use spawn with shell: false");
     }
-    if (/\.stack\b/u.test(source)) {
+    if (/\.stack\b/u.test(source) && relative(root, path) !== "src/activity.ts") {
       report(path, "no-stack-leak", "raw stack access is prohibited");
     }
     if (/console\.log\s*\(/u.test(source)) {

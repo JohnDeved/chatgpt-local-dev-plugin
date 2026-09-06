@@ -6,6 +6,7 @@ export interface ToolProgress {
 
 export interface ToolCallContext {
   meta?: Record<string, unknown>;
+  runOwner?: string;
   signal?: AbortSignal;
   progress?: ToolProgress;
 }
@@ -23,23 +24,13 @@ export function createToolProgress(
 ): ToolProgress | undefined {
   const token = progressToken(meta);
   if (token === undefined) return undefined;
-
-  let last = -1;
+  let sequence = -1;
   return {
-    async report(message, fraction) {
-      const requested = fraction === undefined
-        ? last + 5
-        : Math.round(Math.min(Math.max(fraction, 0), 1) * 100);
-      const progress = Math.min(100, Math.max(last + 1, requested));
-      last = progress;
+    async report(message) {
+      // Heartbeats are activity, not measurable work. No invented percentages or total.
       await sendNotification({
         method: "notifications/progress",
-        params: {
-          progressToken: token,
-          progress,
-          total: 100,
-          message,
-        },
+        params: { progressToken: token, progress: ++sequence, message },
       }).catch(() => undefined);
     },
   };

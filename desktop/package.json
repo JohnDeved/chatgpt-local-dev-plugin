@@ -1,0 +1,44 @@
+{
+  "name": "local-dev-desktop",
+  "productName": "Local Dev",
+  "version": "0.7.0",
+  "private": true,
+  "description": "Local Dev cross-platform web-technology tray companion",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=24.18.0 <25.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/assets.mjs && vite build",
+    "test": "node --experimental-transform-types --test test/*.test.mjs",
+    "test:ui": "npm run build:test-ui && playwright test",
+    "check": "npm run format:check && npm run typecheck && npm run build && npm test && npm run test:ui && npm run package -- --check",
+    "start": "electrobun dev",
+    "package": "node scripts/package.mjs",
+    "install:mac": "node scripts/package.mjs --install --open",
+    "prepare": "electrobun prepare",
+    "build:test-ui": "vite build --mode test",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"scripts/*.mjs\" \"test/*.mjs\" \"test-ui/*.mjs\" \"*.{ts,json,html}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"scripts/*.mjs\" \"test/*.mjs\" \"test-ui/*.mjs\" \"*.{ts,json,html}\""
+  },
+  "dependencies": {
+    "lucide-react": "1.41.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@playwright/test": "1.63.0",
+    "@types/bun": "1.4.1",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "6.1.1",
+    "electrobun": "2.0.1",
+    "prettier": "3.9.6",
+    "typescript": "5.8.3",
+    "vite": "8.2.2"
+  }
+}

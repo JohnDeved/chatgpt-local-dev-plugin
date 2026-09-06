@@ -4,3 +4,11 @@ dist/
 node_modules/
 npm-debug.log*
 .tmp-*/
+
+/build/
+
+/desktop/.hutch/
+/desktop/build/
+/desktop/artifacts/
+/desktop/test-results/
+/desktop/playwright-report/

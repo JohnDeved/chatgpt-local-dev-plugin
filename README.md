@@ -19,6 +19,7 @@ The package targets macOS with Node `24.18.0`.
 nvm install
 nvm use
 npm ci
+npm run desktop:setup
 npm run check
 npm run build
 npm start
@@ -26,7 +27,7 @@ npm start
 
 `npm run check` is the exact repository-wide check. Run `npm run polish` for a repeatable Fallow change audit plus a repo-wide dead-code, duplication, and health report; agents also follow the Ponytail minimal-change ladder in [`AGENTS.md`](./AGENTS.md). The automated integration tests start the stdio server with temporary home directories and no credentials, browser, service, tunnel, or user configuration.
 
-The production server exposes seven native tools:
+The production server exposes ten native tools:
 
 - `project.open`
 - `project.current`
@@ -35,6 +36,11 @@ The production server exposes seven native tools:
 - `dev.poll`
 - `dev.stop`
 - `dev.diff`
+- `run.start`
+- `run.update`
+- `run.finish`
+
+`run.start` publishes the goal and beginning of a user-request workflow; `run.update` supplies brief public summaries and acknowledges locally submitted steering; `run.finish` explicitly reports completion, failure, or cancellation. See [`docs/worker-runs.md`](./docs/worker-runs.md) for attribution and delivery limits.
 
 `project.open` automatically resolves an existing project or creates a durable or temporary project when requested. Temporary projects are removed when the Local Dev runtime closes.
 
@@ -42,9 +48,24 @@ The production server exposes seven native tools:
 
 It reads the shared Codex MCP registry from `~/.codex/config.toml` without modifying it. Local-only project roots, selected downstream server aliases, optional allowlisted local-media inlining, argv-based project hooks, and generic downstream project bindings live in `~/.local-dev/config.json`; see [`docs/configuration.md`](./docs/configuration.md). Selected stdio and Streamable HTTP servers are discovered with pagination, filtered using the Codex settings, namespaced as `<alias>.<tool>`, and forwarded generically.
 
+## Web-technology tray companion
+
+Local Dev includes a persistent tray companion built with **React, TypeScript, Vite, and Electrobun**. Click its status item to open **Runs**, **Attention**, **Processes**, and **Settings**. Goals and explicit run boundaries lead the timeline; commands, output, and original records expand on demand. Pending approvals have a dedicated Attention view, and steering drafts persist locally. Closing the window leaves the tray companion running.
+
+```sh
+npm run check
+npm run desktop:install
+```
+
+The app is installed at `~/Applications/Local Dev.app`. Existing macOS login registration is not automatically changed; the Settings page opens the OS startup controls. The previous SwiftUI app is retained as a backup during installation. An existing tunnel runtime must reconnect to load the updated server. The app diagnoses this as **Runtime update needed** and offers **Reconnect updated runtime…**, with an explicit warning that existing managed commands may stop. Installing the companion restarts only its UI, not the tunnel or development processes.
+
+Approval-required is the default. **Auto-approve all** requires an explicit confirmation in the local app, remains visibly indicated while enabled, and can optionally be remembered across restarts. **Pause** always overrides auto-approval. The approval policy is not exposed as an MCP tool.
+
+The local journal preserves full, unmasked records with owner-only permissions. It can contain credentials and execution environment values; it is not automatically uploaded or added to the ChatGPT conversation. The model-facing output tail remains bounded without truncating the local archive. No automatic archive deletion is enabled. See [`docs/web-desktop.md`](./docs/web-desktop.md) for the researched stack, security boundary, tests, installation, and cross-platform work remaining. The earlier native implementation is documented in [`docs/menu-bar.md`](./docs/menu-bar.md).
+
 ## ChatGPT tool activity
 
-Local Dev is a tool-only MCP server. It does not expose dashboards, MCP Apps resources, embedded widgets, project pickers, question forms, media viewers, or observability tools. Native and proxied tools provide concise `openai/toolInvocation/invoking` and `openai/toolInvocation/invoked` status metadata so ChatGPT can show command activity in its standard tool UI. When the client supplies an MCP progress token, Local Dev also streams project phases, exact command arguments, five-second foreground-command heartbeats, batch step names, diff phases, and downstream MCP progress. Its server instructions require concise narration before multi-step workflows and at meaningful milestones, providing a fallback when a client does not render progress notifications. Any downstream embedded-UI metadata is stripped while non-UI metadata, schemas, annotations, and tool results are preserved. See [`docs/chatgpt-progress.md`](./docs/chatgpt-progress.md).
+The stdio server remains tool-only: it does not expose MCP Apps widgets or a public dashboard. Optional MCP invocation labels and client-requested progress notifications supplement the independent local display. Progress heartbeats use increasing activity counters rather than invented completion percentages, and returned tool errors no longer receive successful completion labels. Assistant narration is useful but is not a guaranteed visibility mechanism. See [`docs/chatgpt-progress.md`](./docs/chatgpt-progress.md).
 
 ## Set up
 

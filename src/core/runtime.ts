@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
+import { currentActivity } from "../activity.js";
 import type { ProjectBinding, ProjectOpenHook } from "../config/types.js";
 import { isPathInside } from "../path.js";
 import type { ToolProgress } from "../progress.js";
@@ -170,7 +171,13 @@ async function runProjectHooks(
       0.35 + (index / Math.max(hooks.length, 1)) * 0.2,
     );
     try {
-      const result = await processes.run(hook.argv, project.path, false);
+      const current = currentActivity();
+      current?.signal.throwIfAborted();
+      const runHook = async (): Promise<ProcessSnapshot> => await processes.run(hook.argv, project.path, false);
+      const result = current === undefined ? await runHook() : await current.hub.execute(
+        { name: "project.hook", title: `Project hook ${index + 1}` },
+        { argv: hook.argv, cwd: project.path }, runHook,
+      );
       if (result.exitCode === 0) continue;
       if (project.kind === "temporary") await rm(project.path, { recursive: true, force: true });
       return failure("project.open", "PROJECT_HOOK_FAILED", "A configured project-open hook exited unsuccessfully.", processData(result));
@@ -340,6 +347,10 @@ export class CoreRuntime {
           snapshot === undefined ? null : processData(snapshot),
         );
       }
+      if (code === "OPERATION_CANCELLED" || code === "COMMAND_STOP_UNCONFIRMED") {
+        return failure("dev.run", code, code === "OPERATION_CANCELLED" ? "Command was cancelled." : "Termination could not be confirmed; inspect local process controls.", snapshot === undefined ? null : processData(snapshot));
+      }
+      if (code === "STEERING_PENDING") return failure("dev.run", code, "New local user steering must be acknowledged before starting another command.");
       if (code === "BACKGROUND_BUSY") return failure("dev.run", code, "Only one background process may run at a time.");
       if (code === "INVALID_ARGV") return failure("dev.run", code, "argv must contain a command and non-empty arguments.");
       if (code === "INVALID_SHELL") return failure("dev.run", code, "Shell evaluation flags are not allowed; pass the executable and arguments directly.");
@@ -360,6 +371,7 @@ export class CoreRuntime {
     let firstFailure: number | null = null;
     await progress?.report(`Preparing ${steps.length} command steps…`, 0.05);
     for (const [index, step] of steps.entries()) {
+      currentActivity()?.signal.throwIfAborted();
       const label = commandLabel(step.argv);
       await progress?.report(
         `Step ${index + 1}/${steps.length}: ${label}`,
@@ -430,7 +442,7 @@ export class CoreRuntime {
   }
 
   async close(): Promise<void> {
-    await this.processes.stop();
+    await this.processes.close();
     await Promise.allSettled([...this.temporaryProjects].map((path) => rm(path, { recursive: true, force: true })));
     this.temporaryProjects.clear();
   }

@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "npm run clean && tsc -p tsconfig.json && node scripts/make-bin-executable.mjs",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm test",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run menu:check && npm run desktop:check",
     "format": "node scripts/format.mjs",
     "format:check": "node scripts/format.mjs --check",
     "lint": "node scripts/lint.mjs",
@@ -21,7 +21,14 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "clean": "node scripts/clean.mjs",
     "polish": "npm run check && fallow audit && npm run polish:report",
-    "polish:report": "fallow dead-code && fallow dupes && fallow health --score --targets --report-only"
+    "polish:report": "fallow dead-code && fallow dupes && fallow health --score --targets --report-only",
+    "menu:build": "node scripts/menu-bar.mjs",
+    "menu:check": "node scripts/menu-bar.mjs --check",
+    "menu:install": "node scripts/menu-bar.mjs --install --open",
+    "desktop:setup": "npm ci --prefix desktop && npm exec --prefix desktop -- playwright install chromium webkit",
+    "desktop:check": "npm run check --prefix desktop",
+    "desktop:build": "npm run package --prefix desktop",
+    "desktop:install": "npm run install:mac --prefix desktop"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

@@ -12,6 +12,7 @@ const envelope = {
     tool: { type: "string" },
     data: {},
     error: { anyOf: [{ type: "null" }, { type: "object" }] },
+    localDevRun: { type: "object", description: "Run context and pending local user steering, when supplied by the server. Acknowledge returned steering IDs with run.update before further actions." },
   },
   required: ["ok", "tool", "data", "error"],
 };

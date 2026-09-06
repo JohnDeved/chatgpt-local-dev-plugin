@@ -69,7 +69,9 @@ async function fixture({ hook = false, proxy = false } = {}) {
   const home = await mkdtemp(join(tmpdir(), "local-dev-core-"));
   const project = join(home, "projects", "demo");
   await mkdir(join(home, ".codex"), { recursive: true });
-  await mkdir(join(home, ".local-dev"), { recursive: true });
+  await mkdir(join(home, ".local-dev", "activity"), { recursive: true, mode: 0o700 });
+  // Explicit fixture policy; production defaults remain approval-required.
+  await writeFile(join(home, ".local-dev", "activity", "settings.json"), JSON.stringify({ autoApprove: true, remember: true }), { mode: 0o600 });
   await mkdir(project, { recursive: true });
   await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo-project" }), "utf8");
   const fakeServer = new URL("./fake-mcp-server.mjs", import.meta.url).pathname;
@@ -98,6 +100,9 @@ async function initialize(client) {
     clientInfo: { name: "core-test", version: "1.0.0" },
   });
   client.notify("notifications/initialized", {});
+  const started = await client.request("tools/call", { name: "run.start", arguments: { goal: "Verify isolated stdio behavior" } });
+  const runId = started.result.structuredContent.data.run.id;
+  await client.request("tools/call", { name: "run.update", arguments: { runId, summary: "Run the isolated integration assertions.", todos: [{ id: "verify", title: "Verify stdio behavior", status: "in_progress" }] } });
   return response;
 }
 
@@ -120,6 +125,10 @@ test("production stdio server exposes tool-only native tools with ChatGPT status
       "dev.poll",
       "dev.stop",
       "dev.diff",
+      "ask",
+      "run.start",
+      "run.update",
+      "run.finish",
     ]);
     for (const tool of listed.result.tools) {
       assert.equal(typeof tool.annotations.readOnlyHint, "boolean");
@@ -132,6 +141,9 @@ test("production stdio server exposes tool-only native tools with ChatGPT status
       assert.equal(tool._meta.ui, undefined);
       assert.equal(tool._meta["openai/outputTemplate"], undefined);
     }
+    const ask = listed.result.tools.find((tool) => tool.name === "ask");
+    assert.equal(ask.annotations.readOnlyHint, true);
+    assert.match(ask.description, /90 seconds/u);
     const current = await client.request("tools/call", { name: "project.current", arguments: {} });
     assert.equal(current.result.structuredContent.data.path, null);
     assert.equal(client.stderr, "");
@@ -149,7 +161,8 @@ test("streams human-readable progress for long native tools", async () => {
     .map(({ params }) => params);
   const assertMonotonic = (values) => {
     assert.equal(values[0].progress, 0);
-    assert.equal(values.at(-1).progress, 100);
+    assert.ok(values.length >= 2);
+    assert.equal(values.every((value) => value.total === undefined), true);
     for (let index = 1; index < values.length; index += 1) {
       assert.ok(values[index].progress > values[index - 1].progress);
     }

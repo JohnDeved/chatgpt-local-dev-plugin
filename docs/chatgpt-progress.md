@@ -1,44 +1,33 @@
-# ChatGPT progress and narration
+# Local activity, ChatGPT progress, and narration
 
-Local Dev uses two complementary visibility mechanisms.
+## Independent local visibility
+
+The native macOS menu-bar app is the primary visibility mechanism. `src/activity.ts` records requests, decisions, execution, output, results, and errors independently of client progress tokens or assistant narration. It also enforces approval and pause policy before dispatch. See [the menu-bar guide](./menu-bar.md).
+
+The local archive is unredacted and contains complete captured payloads. It is not automatically exported or included in model-facing tool results. It is a local execution-boundary record, not a claim to observe every internal action of an arbitrary downstream tool.
 
 ## Assistant narration
 
-The MCP server instructions tell ChatGPT to:
+Server instructions still ask ChatGPT to announce multi-step work, identify tools and command arguments, and provide meaningful milestone updates. Those instructions are useful but cannot guarantee that an assistant will narrate. The local interface does not depend on them.
 
-- announce the immediate next action before a multi-step tool workflow;
-- report meaningful milestones or provide an update after roughly three tool calls;
-- name the exact Local Dev tool and command arguments being used;
-- announce commands and browser actions that may take more than ten seconds;
-- avoid both long silent periods and noisy narration of trivial reads.
+## Optional MCP activity and progress
 
-This is the guaranteed fallback when a client does not request or render MCP progress notifications.
+Tools continue to expose `openai/toolInvocation/invoking` and `openai/toolInvocation/invoked` labels. When the MCP client provides `_meta.progressToken`, the server also sends `notifications/progress`.
 
-## Tool activity and progress
+Unknown-duration work uses strictly increasing activity counters with no invented total. A five-second heartbeat therefore cannot reach a false 100% completion or repeat a saturated progress value. Native tools still report project phases, exact command arguments, command-batch steps, shutdown activity, and diff collection. Downstream progress messages and available fractions remain relayed for compatibility; their full reported values are also recorded locally.
 
-Every tool exposes the standard OpenAI invocation labels:
+Notification delivery is best-effort and does not replace the local archive. Clients can ignore or decline notifications without making otherwise successful work fail. The server checks returned tool-error results before choosing its final progress label.
 
-- `openai/toolInvocation/invoking`
-- `openai/toolInvocation/invoked`
-
-When the MCP client supplies `_meta.progressToken`, Local Dev also emits standard `notifications/progress` messages. Native tools report:
-
-- project search, hook, binding, and activation phases;
-- exact command paths and arguments with five-second foreground-command heartbeats;
-- command-batch step numbers and complete command summaries;
-- background-process shutdown phases;
-- Git diff collection phases.
-
-Proxied MCP progress is relayed to the original client. Notification delivery is best-effort: a client that ignores or rejects a progress message does not cause the underlying tool call to fail.
-
-Command progress shows the complete executable path and every argument exactly as Local Dev received them, including inline source and credential-like values. Progress messages are forwarded without normalization or truncation. Separate `dev.diff` handling for recognized credential-file paths remains unchanged because those file contents would be transmitted into the ChatGPT conversation rather than only displayed on the local machine.
+Command arguments sent in progress notifications are transmitted to the MCP client; they are not merely displayed on the local machine. The complete local execution environment and diagnostic archive are separate and are not automatically attached to those notifications. Existing credential-path protections on model-facing `dev.diff` output are unchanged.
 
 ## Verification
 
-Run the full repository check:
+Run:
 
 ```sh
 npm run check
 ```
 
-The stdio integration suite verifies a real five-second command heartbeat, project-opening phases, batch step messages, monotonic progress values, downstream progress relay, exact command display, and the narration instructions returned during MCP initialization.
+The stdio suite covers project phases, command heartbeats, batch messages, downstream progress relay, exact command display, and initialization instructions. The activity suite additionally verifies capture without a progress token, hundreds of strictly increasing updates, full local output beyond the model-facing tail, and error-aware terminal states. The native build checks archive integrity and layout separately.
+
+Passing protocol tests alone does not establish that the real tunnel, native approval interaction, login startup, or reboot behavior has been verified. Report those observations independently.
