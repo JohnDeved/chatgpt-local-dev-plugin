@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Check, ChevronDown, Circle, ListTodo, MessageSquare, Pause, Play, X } from "lucide-react";
 import type { RunItem, SteeringItem, TaskStatus } from "../shared/contracts.ts";
-import { HistoryTimestamp } from "./RunTime.tsx";
+import { ElapsedClock, HistoryTimestamp } from "./RunTime.tsx";
 import s from "./app.module.css";
 
 export function TaskStatusLabel({ status }: { status?: TaskStatus }) {
@@ -102,7 +102,20 @@ export function RunTasks({ run }: { run: RunItem }) {
                     Linked to your direction
                   </small>
                 )}
-                <TaskStatusLabel status={todo.status} />
+                <div className={s.todoMeta}>
+                  <TaskStatusLabel status={todo.status} />
+                  <ElapsedClock
+                    start={
+                      todo.activeStartedAt ??
+                      (todo.status === "in_progress" ? todo.updatedAt : undefined)
+                    }
+                    elapsedMs={todo.activeElapsedMs ?? 0}
+                    active={todo.status === "in_progress"}
+                    label={`${todo.title} active time`}
+                    className={s.todoClock}
+                    dataId={todo.id}
+                  />
+                </div>
                 {todo.note && <p>{todo.note}</p>}
               </li>
             ))}

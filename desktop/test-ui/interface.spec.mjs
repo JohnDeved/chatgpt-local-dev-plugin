@@ -305,14 +305,14 @@ test("runs have clear goals, explicit boundaries, and expandable command output"
     .getByRole("button", { name: "Open run: Verify command output handling", exact: true })
     .click();
   await expect(page.getByRole("article", { name: "Verify command output handling" })).toContainText(
-    "End",
+    "Completed",
   );
 });
 
 test("attention view exposes approvals without expanding a run", async ({ page }) => {
   await load(page);
   await page.getByRole("button", { name: "Attention", exact: false }).first().click();
-  await expect(page.getByRole("heading", { name: "Decisions, not distractions." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Attention", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Approve", exact: true }).click();
   await expect(page.getByText("No approvals are waiting.")).toBeVisible();
   expect(
@@ -716,6 +716,7 @@ test("new nested activity opens its ancestor and old history never steals expans
   // A denser layout may not need scrolling, so following need not have been suspended.
   const resume = page.getByRole("button", { name: "Resume live following", exact: true });
   if (await resume.count()) await resume.click();
+  await expect(page.locator("article").first()).toHaveAttribute("data-live-follow", "following");
   await appendStep(page, "rootnext", 7);
   await expect(row(page, "read")).toHaveAttribute("data-expanded", "false");
   await expect(row(page, "rootnext")).toHaveAttribute("data-expanded", "true");
@@ -838,6 +839,315 @@ test("workbench terminal and preferences have a visible identity", async ({ page
     animations: "disabled",
     path: `../build/desktop-previews/${testInfo.project.name}-preferences.png`,
   });
+});
+
+test("run state is separate above the newest-first action timeline", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1180, height: 820 });
+  await load(page);
+  const activity = page.getByRole("region", { name: "Run activity", exact: true });
+  const status = page.getByRole("region", { name: "Run status", exact: true });
+  const toolbar = page.locator("[data-follow-control]");
+  const start = activity.locator('[data-run-boundary="start"]');
+  const first = activity.locator("[data-call-id]").first();
+  await expect(activity.getByRole("region", { name: "Run status", exact: true })).toHaveCount(0);
+  await expect(status).toContainText("Still in progress");
+  expect(await status.evaluate((element) => getComputedStyle(element).position)).not.toBe("sticky");
+  const runningPresentation = await status.evaluate((element) => ({
+    height: element.getBoundingClientRect().height,
+    glyph: element.querySelector("span")?.getBoundingClientRect().width ?? 0,
+    radius: Number.parseFloat(getComputedStyle(element).borderRadius),
+    sourceSize: Number.parseFloat(
+      getComputedStyle(element.querySelector("div > span") ?? element).fontSize,
+    ),
+  }));
+  expect(runningPresentation.height).toBeGreaterThanOrEqual(36);
+  expect(runningPresentation.glyph).toBeGreaterThanOrEqual(28);
+  expect(runningPresentation.radius).toBeGreaterThanOrEqual(10);
+  expect(runningPresentation.sourceSize).toBeGreaterThanOrEqual(10);
+  let [statusBox, firstBox, startBox] = await Promise.all([
+    status.boundingBox(),
+    first.boundingBox(),
+    start.boundingBox(),
+  ]);
+  expect(statusBox.y).toBeLessThan(firstBox.y);
+  expect(firstBox.y).toBeLessThan(startBox.y);
+  const toolbarBox = await toolbar.boundingBox();
+  expect(statusBox.y - (toolbarBox.y + toolbarBox.height)).toBeGreaterThanOrEqual(6);
+  const runningRail = await first.evaluate((element) => {
+    const rail = element.parentElement;
+    return {
+      top: rail?.getBoundingClientRect().top ?? Number.NaN,
+      connectorDisplay: rail ? getComputedStyle(rail, "::before").display : "none",
+      connectorTop: rail ? Number.parseFloat(getComputedStyle(rail, "::before").top) : Number.NaN,
+    };
+  });
+  const runningGap = runningRail.top - (statusBox.y + statusBox.height);
+  expect(runningGap).toBeGreaterThanOrEqual(8);
+  expect(runningGap).toBeLessThanOrEqual(9);
+  expect(runningRail.connectorDisplay).toBe("block");
+  expect(runningRail.connectorTop).toBeLessThanOrEqual(-8);
+  await page.screenshot({
+    animations: "disabled",
+    path: `../build/desktop-previews/${testInfo.project.name}-timeline-running-order.png`,
+  });
+
+  await page.evaluate(() => {
+    const snapshot = window.fixtureSnapshot();
+    window.fixtureSet({
+      runs: snapshot.runs.map((run) =>
+        run.runId === "active" ? { ...run, connected: false } : run,
+      ),
+    });
+  });
+  await expect(status).toContainText("Connection lost");
+  await expect(status).toContainText("Completion is unknown. The archive is retained.");
+  const disconnectedPresentation = await status.evaluate((element) => ({
+    glyph: element.querySelector("span")?.getBoundingClientRect().width ?? 0,
+    radius: Number.parseFloat(getComputedStyle(element).borderRadius),
+    leftBorder: getComputedStyle(element).borderLeftColor,
+    topBorder: getComputedStyle(element).borderTopColor,
+  }));
+  expect(disconnectedPresentation.glyph).toBeGreaterThanOrEqual(28);
+  expect(disconnectedPresentation.radius).toBeGreaterThanOrEqual(10);
+  expect(disconnectedPresentation.leftBorder).not.toBe(disconnectedPresentation.topBorder);
+
+  await page.evaluate(() => {
+    const snapshot = window.fixtureSnapshot();
+    window.fixtureSet({
+      runs: snapshot.runs.map((run) =>
+        run.runId === "active"
+          ? {
+              ...run,
+              state: "completed",
+              endedAt: "2026-09-05T17:00:06.000Z",
+              summary: "Run completed after the final recorded action.",
+            }
+          : run,
+      ),
+      calls: snapshot.calls.map((call) =>
+        call.runId === "active"
+          ? {
+              ...call,
+              state: "completed",
+              endedAt: call.endedAt ?? "2026-09-05T17:00:05.500Z",
+              summary: call.summary || "Completed",
+            }
+          : call,
+      ),
+    });
+  });
+  await expect(status).toContainText("Completed");
+  await expect(status).toContainText("Outcome reported by ChatGPT");
+  await expect(status).toContainText("Run completed after the final recorded action.");
+  const terminalPresentation = await status.evaluate((element) => {
+    const glyph = element.querySelector("span");
+    const source = element.querySelector("div > span");
+    const summary = element.querySelector("p");
+    return {
+      height: element.getBoundingClientRect().height,
+      glyph: glyph?.getBoundingClientRect().width ?? 0,
+      sourceDisplay: source ? getComputedStyle(source).display : "",
+      summaryFont: summary ? Number.parseFloat(getComputedStyle(summary).fontSize) : 0,
+      radius: Number.parseFloat(getComputedStyle(element).borderRadius),
+    };
+  });
+  expect(terminalPresentation.height).toBeGreaterThan(runningPresentation.height + 20);
+  expect(terminalPresentation.glyph).toBeGreaterThanOrEqual(28);
+  expect(terminalPresentation.sourceDisplay).toBe("block");
+  expect(terminalPresentation.summaryFont).toBeGreaterThanOrEqual(12);
+  expect(terminalPresentation.radius).toBeGreaterThanOrEqual(10);
+  [statusBox, firstBox, startBox] = await Promise.all([
+    status.boundingBox(),
+    first.boundingBox(),
+    start.boundingBox(),
+  ]);
+  expect(statusBox.y).toBeLessThan(firstBox.y);
+  expect(firstBox.y).toBeLessThan(startBox.y);
+  const terminalRailTop = await first.evaluate(
+    (element) => element.parentElement?.getBoundingClientRect().top ?? Number.NaN,
+  );
+  const terminalGap = terminalRailTop - (statusBox.y + statusBox.height);
+  expect(terminalGap).toBeGreaterThanOrEqual(8);
+  expect(terminalGap).toBeLessThanOrEqual(9);
+  await page.screenshot({
+    animations: "disabled",
+    path: `../build/desktop-previews/${testInfo.project.name}-timeline-completed-order.png`,
+  });
+  await page.setViewportSize({ width: 390, height: 780 });
+  await expect(status).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const narrowSummary = status.locator("p");
+  await expect(narrowSummary).toContainText("Run completed after the final recorded action.");
+  expect(
+    await narrowSummary.evaluate((element) =>
+      Number.parseFloat(getComputedStyle(element).fontSize),
+    ),
+  ).toBeGreaterThanOrEqual(12);
+});
+
+test("timeline dots, connectors, and boundary markers share one exact axis", async ({
+  page,
+}, testInfo) => {
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width === 390 ? 780 : 900 });
+    await load(page);
+    const geometry = await page.evaluate(() => {
+      const activity = document.querySelector('section[aria-label="Run activity"]');
+      const rail = [...activity.children].find((element) =>
+        String(element.className).includes("runRail"),
+      );
+      const calls = [...rail.children].filter(
+        (element) => element instanceof HTMLElement && element.dataset.callId,
+      );
+      const nodeFor = (call) =>
+        [...call.children].find((element) => String(element.className).includes("timelineNode"));
+      const centerX = (element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.left + rect.width / 2;
+      };
+      const first = calls[0];
+      const second = calls[1];
+      const last = calls.at(-1);
+      const firstRect = first.getBoundingClientRect();
+      const firstStyle = getComputedStyle(first);
+      const connector = getComputedStyle(first, "::before");
+      const lineCenter =
+        firstRect.left +
+        parseFloat(firstStyle.borderLeftWidth) +
+        parseFloat(connector.left) +
+        parseFloat(connector.width) / 2;
+      const boundaries = [...activity.querySelectorAll("div")].filter((element) =>
+        String(element.className).includes("boundary"),
+      );
+      const startBoundary = boundaries.find((element) => element.textContent.includes("Start"));
+      const boundaryIcon = [...startBoundary.children].find((element) =>
+        String(element.className).includes("boundaryIcon"),
+      );
+      const latest = calls.find((call) => call.dataset.latest === "true");
+      const latestNode = nodeFor(latest);
+      const latestStyle = getComputedStyle(latestNode);
+      return {
+        lineCenter,
+        firstNodeCenter: centerX(nodeFor(first)),
+        secondNodeCenter: centerX(nodeFor(second)),
+        boundaryCenter: centerX(boundaryIcon),
+        lineWidth: parseFloat(connector.width),
+        nodeSize: nodeFor(first).getBoundingClientRect().width,
+        lastConnectorDisplay: getComputedStyle(last, "::before").display,
+        latestOutlineWidth: parseFloat(latestStyle.outlineWidth),
+        latestOutlineOffset: parseFloat(latestStyle.outlineOffset),
+      };
+    });
+    expect(Math.abs(geometry.firstNodeCenter - geometry.lineCenter)).toBeLessThan(0.1);
+    expect(Math.abs(geometry.secondNodeCenter - geometry.lineCenter)).toBeLessThan(0.1);
+    expect(Math.abs(geometry.boundaryCenter - geometry.lineCenter)).toBeLessThan(0.1);
+    expect(geometry.lineWidth).toBe(2);
+    expect(geometry.nodeSize).toBe(10);
+    expect(geometry.lastConnectorDisplay).toBe("none");
+    expect(geometry.latestOutlineWidth).toBe(1);
+    expect(geometry.latestOutlineOffset).toBe(2);
+    await page.screenshot({
+      animations: "disabled",
+      path: `../build/desktop-previews/${testInfo.project.name}-timeline-axis-${width}.png`,
+    });
+  }
+});
+
+test("earlier-history control continues below the timeline and stays on the shared axis", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1180, height: 820 });
+  const extras = Array.from({ length: 10 }, (_, index) => ({
+    ...state.calls[0],
+    id: `runtime:history-${index}`,
+    operationId: `history-${index}`,
+    parentId: undefined,
+    title: `History action ${index + 1}`,
+    state: "completed",
+    startedAt: `2026-09-05T16:59:${String(index).padStart(2, "0")}.000Z`,
+    endedAt: `2026-09-05T16:59:${String(index + 1).padStart(2, "0")}.000Z`,
+    commands: [],
+    tool: "serena.read_file",
+    target: `src/history-${index}.ts`,
+  }));
+  await load(page, { calls: [...extras, ...state.calls] });
+  const activity = page.getByRole("region", { name: "Run activity", exact: true });
+  const rail = activity.locator('[class*="runRail"]').first();
+  const reveal = activity.getByRole("button", { name: /Show \d+ earlier steps/ });
+  await expect(reveal).toBeVisible();
+  const geometry = await Promise.all([rail.boundingBox(), reveal.boundingBox()]);
+  expect(geometry[1].y).toBeGreaterThanOrEqual(geometry[0].y + geometry[0].height - 1);
+  const marker = reveal.locator('[class*="historyRevealMarker"]');
+  const firstNode = rail
+    .locator(":scope > [data-call-id]")
+    .first()
+    .locator(':scope > [class*="timelineNode"]');
+  const centers = await Promise.all([marker.boundingBox(), firstNode.boundingBox()]);
+  expect(
+    Math.abs(centers[0].x + centers[0].width / 2 - (centers[1].x + centers[1].width / 2)),
+  ).toBeLessThan(0.1);
+  await reveal.scrollIntoViewIfNeeded();
+  await expect(reveal).toBeInViewport();
+  await page.screenshot({
+    animations: "disabled",
+    path: `../build/desktop-previews/${testInfo.project.name}-history-reveal.png`,
+  });
+  await reveal.click();
+  const collapse = activity.getByRole("button", { name: "Show recent steps only", exact: true });
+  await expect(collapse).toBeVisible();
+  const expandedGeometry = await Promise.all([rail.boundingBox(), collapse.boundingBox()]);
+  expect(expandedGeometry[1].y).toBeGreaterThanOrEqual(
+    expandedGeometry[0].y + expandedGeometry[0].height - 1,
+  );
+});
+
+test("quiet utility styling avoids decorative dashboard effects", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await load(page);
+  const runs = page.getByRole("button", { name: "Runs", exact: true });
+  const app = page.locator('[data-design="lavender-reference-0.6"]');
+  const heroIcon = page.locator('[data-overview] [aria-hidden="true"]').first();
+  const activeCall = row(page, "approval");
+  const context = page.getByRole("complementary", { name: "Run context", exact: true });
+  const latestUpdate = context.getByRole("region", { name: "Latest public update", exact: true });
+  const styles = await Promise.all(
+    [app, runs, heroIcon, activeCall, latestUpdate].map((locator) =>
+      locator.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          backgroundImage: style.backgroundImage,
+          boxShadow: style.boxShadow,
+          borderRadius: style.borderRadius,
+        };
+      }),
+    ),
+  );
+  for (const style of styles) {
+    expect(style.backgroundImage).toBe("none");
+    expect(style.boxShadow).toBe("none");
+  }
+  expect(parseFloat(styles[2].borderRadius)).toBeLessThanOrEqual(8);
+  expect(parseFloat(styles[3].borderRadius)).toBeLessThanOrEqual(8);
+  expect(parseFloat(styles[4].borderRadius)).toBe(0);
+  await row(page, "check").locator(":scope > button").click();
+  const terminal = row(page, "check").getByRole("region", {
+    name: "Command npm run check",
+    exact: true,
+  });
+  const terminalStyle = await terminal.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      backgroundImage: style.backgroundImage,
+      boxShadow: style.boxShadow,
+      borderRadius: style.borderRadius,
+    };
+  });
+  expect(terminalStyle.backgroundImage).toBe("none");
+  expect(terminalStyle.boxShadow).toBe("none");
+  expect(parseFloat(terminalStyle.borderRadius)).toBeLessThanOrEqual(8);
+  await page.getByRole("button", { name: "Attention", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Attention", exact: true })).toBeVisible();
+  await expect(page.locator('[class*="pageIcon"]')).toBeHidden();
 });
 
 async function trackActualAnimations(page) {
@@ -1166,6 +1476,72 @@ test("all five task states are distinct from steering delivery and update withou
   await expect(tasks.locator('[data-todo-id="task-2"]')).toContainText("Paused");
 });
 
+test("todo active-time clocks ignore queued time, tick in progress, and freeze while paused or done", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date("2026-09-05T17:00:10.000Z") });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const run = {
+    ...state.runs[0],
+    todos: [
+      {
+        id: "queued-clock",
+        title: "Queued timed task",
+        status: "queued",
+        createdAt: "2026-09-05T17:00:00.000Z",
+        updatedAt: "2026-09-05T17:00:00.000Z",
+        activeElapsedMs: 0,
+      },
+      {
+        id: "live-clock",
+        title: "Live timed task",
+        status: "in_progress",
+        createdAt: "2026-09-05T17:00:00.000Z",
+        updatedAt: "2026-09-05T17:00:05.000Z",
+        activeElapsedMs: 3_000,
+        activeStartedAt: "2026-09-05T17:00:05.000Z",
+      },
+      {
+        id: "paused-clock",
+        title: "Paused timed task",
+        status: "paused",
+        createdAt: "2026-09-05T17:00:00.000Z",
+        updatedAt: "2026-09-05T17:00:08.000Z",
+        activeElapsedMs: 7_000,
+      },
+      {
+        id: "done-clock",
+        title: "Completed timed task",
+        status: "completed",
+        createdAt: "2026-09-05T17:00:00.000Z",
+        updatedAt: "2026-09-05T17:00:09.000Z",
+        activeElapsedMs: 5_000,
+        endedAt: "2026-09-05T17:00:09.000Z",
+      },
+    ],
+  };
+  await load(page, { runs: [run] });
+  const tasks = page
+    .getByRole("complementary", { name: "Run context", exact: true })
+    .getByRole("region", { name: "Run to-dos", exact: true });
+  const queued = tasks.locator('[data-elapsed-clock="queued-clock"]');
+  const live = tasks.locator('[data-elapsed-clock="live-clock"]');
+  const paused = tasks.locator('[data-elapsed-clock="paused-clock"]');
+  const done = tasks.locator('[data-elapsed-clock="done-clock"]');
+  await expect(queued).toHaveCount(0);
+  await expect(live).toContainText("8s");
+  await expect(paused).toContainText("7s");
+  await expect(done).toContainText("5s");
+  await page.clock.fastForward(2_000);
+  await expect(live).toContainText("10s");
+  await expect(paused).toContainText("7s");
+  await expect(done).toContainText("5s");
+  await expect(tasks.locator('[data-todo-id="queued-clock"]')).toContainText("Queued");
+  await expect(tasks.locator('[data-todo-id="live-clock"]')).toContainText("In progress");
+  await expect(tasks.locator('[data-todo-id="paused-clock"]')).toContainText("Paused");
+  await expect(tasks.locator('[data-todo-id="done-clock"]')).toContainText("Completed");
+});
+
 test("old runtime explains the task activation gap without issuing controls automatically", async ({
   page,
 }) => {
@@ -1277,7 +1653,7 @@ for (const [width, height] of [
       expect(metrics.composer.height).toBeLessThanOrEqual(95);
       expect(metrics.timelineGutter).toBeLessThanOrEqual(50);
       expect(metrics.action.y).toBeLessThan(
-        { 1440: 250, 1180: 260, 1080: 340, 760: 370, 390: 470 }[width],
+        { 1440: 258, 1180: 268, 1080: 348, 760: 378, 390: 478 }[width],
       );
     }
     await mkdir("../build/space-audit", { recursive: true });

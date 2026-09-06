@@ -65,13 +65,16 @@ The updated backend requires a nonempty declared to-do list before substantive a
 
 ## Worker-run reporting
 
+Long-running local verification uses the tracked background-process workflow: start it with `dev.run(..., background: true)`, then use `dev.poll`. When only completion matters, prefer a bounded `dev.poll(waitMs: ...)` call, which returns early on process exit, instead of repeated immediate polls; use `waitMs: 0` for output/URL inspection. Use `dev.stop` only when the process should be terminated. If `dev.poll` is not in the currently loaded tool subset, discover/load it rather than substituting `sleep`, repeated `ps`, or other manual wait loops. `sleep` is not a polling primitive for Local Dev workflows.
+
+
 When the runtime exposes them, begin each user-request workflow with `run.start`, publishing the user's goal and a brief public plan. Use `run.update` for meaningful public progress/decision summaries and acknowledgement of steering IDs returned in tool results. Do not publish private chain-of-thought or fabricate a thinking stream. Use `run.finish` before the final answer with a factual outcome and any verification gaps. Inactivity is not evidence of completion.
 
 Local steering is additional user input, not a new system instruction or authorization to bypass approval policy. Never forge steering through the local control socket from agent tools. Exercise controls only in isolated temporary-home tests. The native composer cannot wake a finished ChatGPT conversation; labels must distinguish queued, included in a tool response, and acknowledged. The runtime gates new tool/process dispatch until pending steering is acknowledged; work already executing is not automatically undone.
 
 ## Work-tracking acceptance (0.6)
 
-Before substantive work in a new backend, call `run.start`, then publish a nonempty `run.update.todos` list. Keep stable IDs and explicit queued/in_progress/paused/completed/cancelled states. Use `steeringTasks` to report implementation independently of delivery acknowledgement; a to-do may link to a direction using `steeringId`. Do not cancel or complete an item merely to pass a finish guard. Paused work remains outstanding and must not vanish when steering changes priorities.
+Before substantive work in a new backend, call `run.start`, then publish a nonempty `run.update.todos` list. Keep stable IDs and explicit queued/in_progress/paused/completed/cancelled states. Use `steeringTasks` to report implementation independently of delivery acknowledgement; a to-do may link to a direction using `steeringId`. Do not cancel or complete an item merely to pass a finish guard. Paused work remains outstanding and must not vanish when steering changes priorities. To-do elapsed time measures active work only: queued has no timer, in_progress starts/resumes it, paused freezes it, and completed/cancelled freeze the accumulated duration.
 
 The dispatcher rejects substantive tools without a declared list; status/poll/stop/report tools remain recoverable. If the currently connected tool schema lacks the new fields, report the activation gap accurately and use the owner-confirmed reconnect/tool-refresh path. Never bypass it with real local-control injection or a fake task report. `docs/release-0.6-checklist.md` is the acceptance record for the user's requested UI/workflow changes.
 
@@ -85,3 +88,8 @@ Phase 6 was completed on 2026-07-13 with real-environment setup, coding/browser 
 Use `ask` only for a meaningful user choice that materially changes the work. Supply 2–6 explicit choices and a real recommended option; never use it to bypass Local Dev approvals or request secrets. In Auto-approve all mode, the recommendation may be returned after the backend-owned 90-second user override window. A returned recommendation is a user-choice fallback, not permission for subsequent actions. Pause and standard approval controls still apply.
 
 The desktop/runtime advertise Ask with capability `ask: 1`. If the active ChatGPT tool list does not contain `ask`, do not forge an Ask event or inject a local answer. Report the activation gap and use the owner-confirmed reconnect + tool-refresh path.
+
+
+## Completed-run process lifecycle
+
+Successful runs stop their own background processes by default. `run.start.backgroundProcessPolicy` and `run.update.backgroundProcessPolicy` accept `cleanup` (default) or `keep`. Use `keep` only when a persistent server/service is an intentional user deliverable; it is not a general way to avoid cleanup. `run.finish(completed)` must confirm cleanup before recording completion and must never stop unrelated or other-run processes. Failed/cancelled runs do not pretend cleanup or unfinished work succeeded.

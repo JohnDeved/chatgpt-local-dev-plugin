@@ -213,12 +213,29 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
       tool: withToolStatus({
         name: "dev.poll",
         title: "Poll background process",
-        description: "Use this when you need the latest state, output tail, exit status, or preview URLs for the tracked background process.",
-        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        description: "Use this after dev.run with background=true to inspect or wait for the tracked background process. Set waitMs to block for up to 120 seconds and return early when the process exits; prefer that bounded wait over repeated polling when you only need completion. Leave waitMs at 0 for an immediate output/URL check.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            waitMs: {
+              type: "integer",
+              description: "Optional bounded wait before returning. Returns early when the process exits; 0 checks immediately.",
+              minimum: 0,
+              maximum: 120_000,
+              default: 0,
+            },
+          },
+          additionalProperties: false,
+        },
         outputSchema: envelope,
         annotations: annotations(true, false, true),
       }, "Checking background process…", "Background process checked"),
-      call: async (input) => Object.keys(input).length === 0 ? result(await runtime.poll()) : invalid("dev.poll"),
+      call: async (input) => {
+        if (Object.keys(input).some((key) => key !== "waitMs")) return invalid("dev.poll");
+        const waitMs = input.waitMs;
+        if (waitMs !== undefined && (typeof waitMs !== "number" || !Number.isInteger(waitMs) || waitMs < 0 || waitMs > 120_000)) return invalid("dev.poll");
+        return result(await runtime.poll(waitMs));
+      },
     },
     {
       tool: withToolStatus({

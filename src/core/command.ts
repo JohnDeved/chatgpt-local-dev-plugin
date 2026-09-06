@@ -73,15 +73,20 @@ export function spawnCommand(
   lifecycles.set(child, life);
   let untrack: () => void = () => undefined;
   const emit = (type: string, data: unknown): void => {
-    try { current?.hub.record(type, data, current.operationId); }
+    try { current?.hub.record(type, data, current.operationId, undefined, current.runId); }
     catch { void terminateCommand(child).catch(() => undefined); }
   };
-  const stop = (): void => {
+  const stop = async (): Promise<boolean> => {
     emit("process.stopRequested", { processId, pid: child.pid });
-    void terminateCommand(child).then((confirmed) => {
+    try {
+      const confirmed = await terminateCommand(child);
       emit(confirmed ? "process.stopped" : "process.stopUnconfirmed", { processId, pid: child.pid });
       if (confirmed) untrack();
-    }).catch((error: unknown) => emit("process.stopUnconfirmed", { processId, error: activityFailure(error) }));
+      return confirmed;
+    } catch (error) {
+      emit("process.stopUnconfirmed", { processId, error: activityFailure(error) });
+      return false;
+    }
   };
   child.once("spawn", () => {
     emit("process.started", { processId, pid: child.pid, argv, cwd });

@@ -10,16 +10,56 @@ export function useTimestamp() {
     timestamp(value, preference, style);
 }
 
-export function elapsedLabel(start: string, end: string | number): string {
-  const seconds = Math.max(
-    0,
-    Math.floor(((typeof end === "number" ? end : Date.parse(end)) - Date.parse(start)) / 1000),
-  );
+export function durationLabel(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
   if (!Number.isFinite(seconds)) return "";
   if (seconds >= 3600)
     return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m ${seconds % 60}s`;
   return seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
 }
+export function elapsedLabel(start: string, end: string | number): string {
+  const endMs = typeof end === "number" ? end : Date.parse(end);
+  const startMs = Date.parse(start);
+  if (!Number.isFinite(endMs) || !Number.isFinite(startMs)) return "";
+  return durationLabel(Math.max(0, endMs - startMs));
+}
+export function ElapsedClock({
+  start,
+  elapsedMs = 0,
+  active = false,
+  label = "Elapsed time",
+  className,
+  dataId,
+}: {
+  start?: string;
+  elapsedMs?: number;
+  active?: boolean;
+  label?: string;
+  className?: string;
+  dataId?: string;
+}) {
+  const ticking = active && !!start;
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!ticking) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [start, ticking]);
+  const startMs = start ? Date.parse(start) : Number.NaN;
+  const currentSegmentMs = ticking && Number.isFinite(startMs) ? Math.max(0, now - startMs) : 0;
+  const totalMs = Math.max(0, elapsedMs + currentSegmentMs);
+  if ((!start && elapsedMs <= 0) || !Number.isFinite(totalMs)) return null;
+  const labelText = durationLabel(totalMs);
+  if (!labelText) return null;
+  return (
+    <span className={className} data-elapsed-clock={dataId} aria-label={`${label}: ${labelText}`}>
+      <Clock3 size={11} />
+      <span data-clock-value>{labelText}</span>
+    </span>
+  );
+}
+
 export function RunClock({ run, compact = false }: { run: RunItem; compact?: boolean }) {
   const ticking = !run.endedAt && run.state === "running" && run.connected;
   const [now, setNow] = useState(Date.now());

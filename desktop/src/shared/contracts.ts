@@ -72,7 +72,11 @@ export interface RunTodo {
   status: TaskStatus;
   steeringId?: string;
   note?: string;
+  createdAt?: string;
   updatedAt: string;
+  activeElapsedMs?: number;
+  activeStartedAt?: string;
+  endedAt?: string;
 }
 export interface SteeringItem {
   id: string;
@@ -96,6 +100,7 @@ export interface RunItem {
   endedAt?: string;
   summary?: string;
   backgroundProcesses: number;
+  backgroundProcessPolicy: "cleanup" | "keep";
   contextScope: string;
   notes: { id: string; kind: string; text: string; timestamp: string }[];
   steering: SteeringItem[];

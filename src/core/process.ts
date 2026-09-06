@@ -150,6 +150,29 @@ export class ProcessManager {
 
   poll(): ProcessSnapshot { return snapshot(this.background); }
 
+  async wait(waitMs: number): Promise<ProcessSnapshot> {
+    const tracked = this.background;
+    if (tracked === undefined || tracked.finishedAt !== null || waitMs <= 0) return snapshot(tracked);
+    const signal = currentActivity()?.signal;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let abort: () => void = () => undefined;
+    try {
+      const timeout = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, Math.min(Math.max(waitMs, 1), MAX_TIMEOUT_MS));
+      });
+      const cancelled = new Promise<void>((resolve) => {
+        abort = resolve;
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
+      });
+      await Promise.race([tracked.exited, timeout, cancelled]);
+      return snapshot(tracked);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
   async stop(): Promise<ProcessSnapshot> {
     const tracked = this.background;
     if (tracked === undefined) return snapshot(undefined);

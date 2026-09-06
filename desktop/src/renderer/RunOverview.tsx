@@ -108,8 +108,11 @@ export function RunOverview({
       </div>
       {run.backgroundProcesses > 0 && (
         <p className={s.overviewBackground}>
-          {run.backgroundProcesses} background process(es) remained running when this run ended. See
-          Processes.
+          {run.backgroundProcesses} background process(es){" "}
+          {run.backgroundProcessPolicy === "keep"
+            ? "were intentionally kept running"
+            : "remained running"}{" "}
+          when this run ended. See Processes.
         </p>
       )}
     </header>

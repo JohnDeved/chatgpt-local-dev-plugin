@@ -1,7 +1,7 @@
 {
   "name": "local-dev-desktop",
   "productName": "Local Dev",
-  "version": "0.7.0",
+  "version": "0.7.9",
   "private": true,
   "description": "Local Dev cross-platform web-technology tray companion",
   "license": "UNLICENSED",

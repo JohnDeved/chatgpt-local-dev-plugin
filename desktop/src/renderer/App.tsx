@@ -327,7 +327,7 @@ export function App({ bridge }: { bridge: DesktopBridge }) {
             </span>
             <div>
               <h1>Local Dev</h1>
-              <p>Your local dev companion</p>
+              <p>Local activity</p>
             </div>
           </div>
           <nav className={s.tabs} aria-label="Main navigation">
@@ -370,7 +370,7 @@ export function App({ bridge }: { bridge: DesktopBridge }) {
               {previousRuns.slice(0, runLimit).map(runLink)}
               {!previousRuns.length && (
                 <p className={s.navEmpty}>
-                  {query ? "No earlier runs match." : "Finished work will live here."}
+                  {query ? "No earlier runs match." : "Completed runs appear here."}
                 </p>
               )}
             </section>
@@ -679,11 +679,11 @@ export function App({ bridge }: { bridge: DesktopBridge }) {
                             <Check size={15} />
                           </span>
                         </div>
-                        <h2>{query ? "No matching runs" : "Ready for your next idea."}</h2>
+                        <h2>{query ? "No matching runs" : "No runs yet"}</h2>
                         <p>
                           {query
                             ? "Try a goal, filename, or command. Your local archive is still available."
-                            : "Start a task in ChatGPT. Follow its goal, watch each action, and guide what happens next—from right here."}
+                            : "Start a task in ChatGPT to see its local actions here."}
                         </p>
                         {query && (
                           <button className={s.secondary} onClick={() => setQuery("")}>
@@ -723,11 +723,8 @@ export function App({ bridge }: { bridge: DesktopBridge }) {
                       <span className={s.pageIcon}>
                         <Inbox size={21} />
                       </span>
-                      <h2>Decisions, not distractions.</h2>
-                      <p>
-                        A dedicated place for actions that need your permission and failures worth a
-                        closer look.
-                      </p>
+                      <h2>Attention</h2>
+                      <p>Questions, approvals, and failed actions.</p>
                     </div>
                     {asks.length > 0 && (
                       <>
@@ -796,11 +793,8 @@ export function App({ bridge }: { bridge: DesktopBridge }) {
                       <span className={s.pageIcon}>
                         <Terminal size={21} />
                       </span>
-                      <h2>Work that keeps running.</h2>
-                      <p>
-                        Development servers and background services stay visible—even after their
-                        run has ended.
-                      </p>
+                      <h2>Processes</h2>
+                      <p>Background commands owned by Local Dev.</p>
                     </div>
                     {!processes.length && (
                       <section className={s.empty}>
@@ -874,18 +868,15 @@ export function App({ bridge }: { bridge: DesktopBridge }) {
                       <span className={s.pageIcon}>
                         <Settings size={21} />
                       </span>
-                      <h2>Make yourself at home.</h2>
-                      <p>
-                        Choose how Local Dev looks and acts. Your activity stays visible in every
-                        mode.
-                      </p>
+                      <h2>Settings</h2>
+                      <p>Local permissions and interface preferences.</p>
                     </div>
                     <section className={s.settingSection}>
                       <div className={s.settingHeading}>
                         <ShieldCheck size={19} />
                         <div>
                           <h3>Permissions</h3>
-                          <p>You set the pace. The runtime enforces it.</p>
+                          <p>Controls enforced by the local runtime.</p>
                         </div>
                       </div>
                       <div className={s.settingRow}>
@@ -945,7 +936,7 @@ export function App({ bridge }: { bridge: DesktopBridge }) {
                         <Sun size={19} />
                         <div>
                           <h3>Appearance</h3>
-                          <p>A comfortable place to follow the work.</p>
+                          <p>Display and timeline preferences.</p>
                         </div>
                       </div>
                       <div className={s.settingRow}>
@@ -1236,7 +1227,7 @@ export function App({ bridge }: { bridge: DesktopBridge }) {
           </div>
           <footer className={s.footer}>
             <ShieldCheck size={12} />
-            <span>Recorded locally. Always inspectable.</span>
+            <span>Local activity archive</span>
             <span className={s.grow} />
             <span className={s.connectionLabel}>
               <i className={connected ? s.liveDot : s.offlineDot} />

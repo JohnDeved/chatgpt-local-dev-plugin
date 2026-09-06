@@ -40,7 +40,7 @@ if (!testHome) {
   } catch {
     /* First launch or stale instance record. */
   }
-  await writeFile(instanceFile, JSON.stringify({ pid: process.pid, version: "0.7.0" }), {
+  await writeFile(instanceFile, JSON.stringify({ pid: process.pid, version: "0.7.9" }), {
     mode: 0o600,
   });
 }
@@ -143,7 +143,7 @@ const show = () => {
             join(directory, "desktop-ready.json"),
             JSON.stringify({
               pid: process.pid,
-              version: "0.7.0",
+              version: "0.7.9",
               domCommitted: true,
               timestamp: new Date().toISOString(),
             }),

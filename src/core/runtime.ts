@@ -414,8 +414,8 @@ export class CoreRuntime {
     return success("dev.batch", { steps: results }, `${results.length} steps completed`);
   }
 
-  async poll(): Promise<ToolCallResult> {
-    const result = await this.processes.poll();
+  async poll(waitMs = 0): Promise<ToolCallResult> {
+    const result = waitMs > 0 ? await this.processes.wait(waitMs) : this.processes.poll();
     return success("dev.poll", processData(result), `state=${result.state}`);
   }
 

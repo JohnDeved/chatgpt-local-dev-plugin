@@ -86,3 +86,59 @@ Ask is a first-class clarification surface, not an approval card. ChatGPT suppli
 In manual policy there is no timeout. With Auto-approve all active, the backend starts a 90-second deadline and the card shows **Recommended in 1:30**. The user can choose any option or allowed custom answer before the deadline. If there is still no answer, the backend—not the renderer—returns exactly the declared recommended option. Pause or disabling auto-approve removes the deadline without discarding the question. Re-enabling auto-approve starts a fresh deadline; changing Remember alone does not restart one already running. Concurrent questions keep independent deadlines.
 
 Ask is read-only and can be used after run.start but before the substantive-work to-do list, so a genuine ambiguity can be resolved before committing to a plan. It never auto-creates a free-text answer and does not bypass later command/edit approvals. The local journal records ask.requested, ask.answered and ask.cancelled; answers distinguish user from auto-recommended sources. Runtime close, operation abort and capture faults cancel pending questions rather than firing a late recommendation.
+
+
+## Quiet utility pass — 0.7.1
+
+The interface should read as a developer utility, not an AI concept dashboard. Keep the lavender accent as identity, but remove decorative gradients, glow, glass blur, orb-like controls, oversized rounded cards, and marketing copy. Use neutral flat surfaces, one violet accent, 6–8px control/card corners, separators in the inspector/settings, compact status treatments, and plain task-oriented labels. The terminal and recorded work are the highest-contrast surfaces.
+
+A card is justified only when it groups an actionable unit (tool call, process, Ask). The right inspector is a continuous panel with separators rather than stacked floating cards. Status color communicates state; it does not decorate unrelated chrome. Decorative page icons and empty-state illustrations are omitted. Motion remains reserved for actual arrivals/disclosures and reduced-motion behavior is unchanged.
+
+
+### Timeline axis refinement — 0.7.2
+
+The activity timeline uses one explicit geometry axis shared by every root action connector, semantic node, and Start/End/open-run marker. Connector segments are 2px neutral lines drawn center-to-center between real action nodes, so the rail begins and ends at actual events instead of extending arbitrarily. Action nodes are 10px circles: completed green, waiting/denied/interrupted amber, failed red, running violet, with a restrained 1px outer ring for the latest action. No glow or gradient is used. The card border remains a uniform 1px so absolute timeline geometry cannot shift between latest and older actions. Responsive layouts change the content indent and section-axis together rather than maintaining unrelated node/line offsets.
+
+
+### Brand exception — 0.7.3
+
+The quiet utility treatment intentionally keeps one expressive brand element: the original Local Dev app mark. The sidebar logo returns to the larger violet/deep-purple gradient tile with its subtle dimensional border/shadow. This exception is limited to the brand mark; timeline nodes, cards, inspector, settings, Ask, terminal, and controls remain in the restrained flat 0.7.x system.
+
+
+### Newest-first boundary chronology — 0.7.4
+
+The activity timeline is newest first, so the current run boundary belongs above actions: an open run shows **Still in progress** first; a completed/interrupted run shows **End / Outcome reported by ChatGPT** first. Root actions then descend from newest to oldest, explicit earlier-history continuation remains below the visible rail, and **Start** stays at the bottom. This is chronological structure, not decoration.
+
+
+### To-do elapsed clocks — 0.7.4
+
+Run to-dos show compact elapsed clocks beside their explicit status, using the same wall-clock duration vocabulary as timeline actions. Open items tick once per second; completed/cancelled items freeze at their terminal timestamp. Timing is secondary metadata—not a progress estimate—and never changes the reported task status.
+
+
+### Run status strip and active-work timers — 0.7.5
+
+Run-level state is not a timeline event. **Still in progress**, **Connection lost**, and terminal outcome state render in a dedicated non-sticky run-status strip above Activity, beside/under the same run-level context as Latest update. The action timeline itself contains only recorded actions/history plus the Start boundary at its oldest end. Completed state shows the ended time, reported outcome label, and summary in the separate strip.
+
+Run to-do timers measure active implementation time rather than task age. `queued` shows no timer. Entering `in_progress` starts or resumes the active segment. `paused` accumulates the current segment and freezes the displayed value. Returning to `in_progress` resumes from the accumulated active duration. `completed` and `cancelled` freeze permanently. The backend persists `activeElapsedMs` and `activeStartedAt`; `createdAt`/`endedAt` remain lifecycle/audit timestamps rather than the timer source.
+
+
+### Terminal outcome card — 0.7.6
+
+Active run state keeps the 14px micro-status line, but terminal outcomes no longer inherit that compressed presentation. Completed/failed/interrupted outcomes render as a calm run-level note above Activity with a neutral surface and outline, one semantic left rail/icon tile, state heading, muted provenance (`Outcome reported by ChatGPT`), ended time, and the reported summary as readable body text. Avoid mixing the violet action-card accent with green/red/warn outcome semantics in the same border treatment.
+
+
+### Unified run-state cards and connected timeline — 0.7.7
+
+All run-level states use one deliberate card grammar above Activity. Open/connected runs use the same neutral card, 28px semantic tile, rounded shape, state heading/detail, and semantic left rail as terminal outcomes; connected uses violet, connection-lost uses amber, completed uses green, failed red, and interrupted/cancelled amber. Terminal states may add the reported summary body; active states stay shorter.
+
+The run-state card is not a timeline action, but it is visually continuous with the action history. Its bottom edge must meet the existing `runRail::before` segment exactly, and that segment lands on the shared `--timeline-axis` before the first action node. Do not add a second decorative connector or leave a gap between the state card and rail. Open-run spacing is compacted around the hero/Activity toolbar so the larger card does not regress protected command/output viewport space.
+
+
+### Run-state card spacing — 0.7.8
+
+Keep the unified run-state card system and direct card-to-timeline-spine connection from 0.7.7, but do not visually merge independent cards above it. Open runs keep a deliberate 6px gap between the Activity toolbar and run-state card. The state-card bottom still meets the existing `runRail::before` connector with no gap. Recover the added vertical spacing from redundant open-run hero/toolbar internals rather than weakening command/output visibility budgets; medium-width and narrow layouts have targeted compact padding for this purpose.
+
+
+### Run-state to timeline spacing — 0.7.9
+
+Keep independent cards separated on both sides of the run-state card. There is an 8px gap from the run-state card to the first action card. The existing shared timeline spine must bridge that gap continuously by extending the `runRail::before` segment upward; do not make the state card touch the first action just to preserve vertical density. The compact steering composer may surrender chrome height to preserve visible command output on short windows.

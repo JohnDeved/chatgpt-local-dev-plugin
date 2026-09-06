@@ -102,3 +102,15 @@ When Auto-approve all is off, Ask waits for the user's explicit choice. When Aut
 The backend owns the timeout, so hiding/closing the desktop panel does not silently cancel the decision period. Multiple questions have independent deadlines. Local controls only submit an option ID already present on that Ask, or bounded custom text. Ask responses are journaled with `source: user` or `source: auto-recommended` and remain distinct from approval events. Any command/edit that follows still passes through normal Local Dev admission and approval policy.
 
 An older connected runtime advertises no `ask` capability. The 0.7 desktop shows an activation warning rather than pretending the tool exists. Reconnect is owner-confirmed because managed commands can stop; after reconnect ChatGPT must refresh its Local Dev tool definitions before `ask` appears in the conversation.
+
+
+## Background-process lifecycle
+
+Runs own background processes by their recorded run ID. The default `backgroundProcessPolicy` is `cleanup`: before `run.finish` can record a `completed` outcome, Local Dev asks every still-running process owned by that run to stop and requires confirmed termination. If any owned process remains, completion is rejected with `RUN_PROCESS_CLEANUP_UNCONFIRMED`; the run stays open so the process can be inspected or stopped explicitly. Other runs and unrelated OS processes are never included.
+
+Use `backgroundProcessPolicy: "keep"` only when keeping a service alive is the intended result—for example, the task is specifically to start a preview/dev server for the user. The policy can be declared with `run.start` or changed with `run.update`. A completed `keep` run records the remaining process count instead of stopping those processes. Failed/cancelled outcomes retain their existing semantics and do not claim successful cleanup.
+
+
+## To-do elapsed timing
+
+Every reported run to-do keeps lifecycle timestamps (`createdAt`, `updatedAt`, and terminal `endedAt`) plus active-work timing state. `queued` has no timer. Entering `in_progress` starts `activeStartedAt`; leaving `in_progress` accumulates that segment into `activeElapsedMs`. `paused` freezes the accumulated value without counting pause time. Returning to `in_progress` starts a new segment on top of the prior accumulated duration. `completed` and `cancelled` freeze active time permanently unless the item is explicitly reopened. Older archived to-dos that predate active timing fields do not invent paused/completed work time; an old `in_progress` item may fall back to its most recent `updatedAt` as the current segment start.

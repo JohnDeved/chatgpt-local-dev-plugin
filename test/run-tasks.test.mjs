@@ -43,6 +43,130 @@ test("todos update in place, survive steering, and prevent a false successful en
   tracker.finish("owner",run.id,"completed","Finished");
 });
 
+test("todo timers measure active work, pause, resume, and ignore queued time", () => {
+  const { tracker, run } = fixture();
+  const wait = (milliseconds) =>
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+
+  tracker.update(
+    "owner",
+    run.id,
+    "Queued",
+    "plan",
+    [],
+    undefined,
+    [],
+    [{ id: "timed", title: "Timed work", status: "queued" }],
+  );
+  const createdAt = run.todos[0].createdAt;
+  assert.ok(createdAt);
+  assert.equal(run.todos[0].activeElapsedMs, 0);
+  assert.equal(run.todos[0].activeStartedAt, undefined);
+  assert.equal(run.todos[0].endedAt, undefined);
+
+  wait(20);
+  tracker.update(
+    "owner",
+    run.id,
+    "Started",
+    "progress",
+    [],
+    undefined,
+    [],
+    [{ id: "timed", status: "in_progress" }],
+  );
+  assert.equal(run.todos[0].createdAt, createdAt);
+  assert.equal(run.todos[0].activeElapsedMs, 0);
+  assert.ok(run.todos[0].activeStartedAt);
+
+  wait(30);
+  tracker.update(
+    "owner",
+    run.id,
+    "Paused",
+    "progress",
+    [],
+    undefined,
+    [],
+    [{ id: "timed", status: "paused" }],
+  );
+  const pausedElapsed = run.todos[0].activeElapsedMs;
+  assert.ok(pausedElapsed >= 20);
+  assert.equal(run.todos[0].activeStartedAt, undefined);
+
+  wait(30);
+  tracker.update(
+    "owner",
+    run.id,
+    "Still paused",
+    "progress",
+    [],
+    undefined,
+    [],
+    [{ id: "timed", status: "paused", note: "Waiting for input" }],
+  );
+  assert.equal(run.todos[0].activeElapsedMs, pausedElapsed);
+  assert.equal(run.todos[0].activeStartedAt, undefined);
+
+  tracker.update(
+    "owner",
+    run.id,
+    "Resumed",
+    "progress",
+    [],
+    undefined,
+    [],
+    [{ id: "timed", status: "in_progress" }],
+  );
+  assert.equal(run.todos[0].activeElapsedMs, pausedElapsed);
+  assert.ok(run.todos[0].activeStartedAt);
+
+  wait(30);
+  tracker.update(
+    "owner",
+    run.id,
+    "Finished",
+    "progress",
+    [],
+    undefined,
+    [],
+    [{ id: "timed", status: "completed", note: "Done" }],
+  );
+  const finishedElapsed = run.todos[0].activeElapsedMs;
+  const endedAt = run.todos[0].endedAt;
+  assert.ok(finishedElapsed > pausedElapsed);
+  assert.equal(run.todos[0].activeStartedAt, undefined);
+  assert.ok(endedAt);
+
+  tracker.update(
+    "owner",
+    run.id,
+    "Clarify completion",
+    "progress",
+    [],
+    undefined,
+    [],
+    [{ id: "timed", status: "completed", note: "Done and checked" }],
+  );
+  assert.equal(run.todos[0].activeElapsedMs, finishedElapsed);
+  assert.equal(run.todos[0].endedAt, endedAt);
+
+  tracker.update(
+    "owner",
+    run.id,
+    "Reopened",
+    "progress",
+    [],
+    undefined,
+    [],
+    [{ id: "timed", status: "in_progress", note: "Follow-up required" }],
+  );
+  assert.equal(run.todos[0].createdAt, createdAt);
+  assert.equal(run.todos[0].activeElapsedMs, finishedElapsed);
+  assert.ok(run.todos[0].activeStartedAt);
+  assert.equal(run.todos[0].endedAt, undefined);
+});
+
 test("cancelled work needs an explicit task outcome; failed runs retain unfinished work", () => {
   const {tracker,run}=fixture(); tracker.update("owner",run.id,"Plan","plan",[],undefined,[],[{id:"optional",title:"Optional animation",status:"queued"}]);
   tracker.update("owner",run.id,"Omitted by request","decision",[],undefined,[],[{id:"optional",status:"cancelled",note:"User chose a different scope"}]);

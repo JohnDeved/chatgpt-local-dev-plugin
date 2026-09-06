@@ -349,8 +349,10 @@ export function RunCard({
   const ids = new Set(calls.map((call) => call.operationId));
   const roots = calls.filter((call) => !call.parentId || !ids.has(call.parentId));
   const [readingEarlier, setReadingEarlier] = useState(false);
+  const [readingRetained, setReadingRetained] = useState<Set<string>>(new Set());
   const expansion = useTimelineExpansion(calls, followNewest, readingEarlier);
   const root = useRef<HTMLElement>(null);
+  const followClickIntent = useRef<"pause" | "resume" | undefined>(undefined);
   const liveFollow = useLiveFollow(
     root,
     expansion.newestId,
@@ -408,16 +410,37 @@ export function RunCard({
       awaitingParents.has(call.operationId),
   );
   const recent = new Set(filtered.slice(-8).map((call) => call.id));
-  const displayed =
-    showAll || readingEarlier
-      ? filtered
-      : filtered.filter(
-          (call) =>
-            recent.has(call.id) ||
-            expansion.open.has(call.id) ||
-            call.state === "waiting" ||
-            awaitingParents.has(call.operationId),
-        );
+  const defaultDisplayed = filtered.filter(
+    (call) =>
+      recent.has(call.id) ||
+      expansion.open.has(call.id) ||
+      call.state === "waiting" ||
+      awaitingParents.has(call.operationId),
+  );
+  const defaultDisplayedKey = defaultDisplayed.map((call) => call.id).join("\u0000");
+  useEffect(() => {
+    if (!readingEarlier) {
+      setReadingRetained((previous) => (previous.size ? new Set() : previous));
+      return;
+    }
+    setReadingRetained((previous) => {
+      let changed = false;
+      const next = new Set(previous);
+      for (const call of defaultDisplayed) {
+        if (next.has(call.id)) continue;
+        next.add(call.id);
+        changed = true;
+      }
+      return changed ? next : previous;
+    });
+  }, [readingEarlier, defaultDisplayedKey]);
+  const defaultDisplayedIds = new Set(defaultDisplayed.map((call) => call.id));
+  const displayed = showAll
+    ? filtered
+    : filtered.filter(
+        (call) =>
+          defaultDisplayedIds.has(call.id) || (readingEarlier && readingRetained.has(call.id)),
+      );
   const running = run.state === "running";
   const executing = calls.filter((call) => ["running", "stopping"].includes(call.state)).length;
   const phase = waiting.length
@@ -434,6 +457,7 @@ export function RunCard({
       ref={root}
       className={s.run}
       aria-label={run.title}
+      data-run-state={run.state}
       data-live-follow={
         liveFollow.following ? "following" : liveFollow.suspended ? "suspended" : "off"
       }
@@ -499,14 +523,35 @@ export function RunCard({
                 ? "Following new actions. Click to pause scrolling."
                 : "Resume following new actions"
             }
-            onClick={() => {
-              if (liveFollow.following) liveFollow.pause();
-              else {
-                onFollowLiveChange?.(true);
-                setFilter("all");
-                if (expansion.newestId) expansion.reveal(expansion.newestId, followNewest);
-                liveFollow.resume();
+            onPointerDown={(event) => {
+              if (followClickIntent.current) return;
+              followClickIntent.current =
+                event.currentTarget.getAttribute("aria-label") === "Resume live following"
+                  ? "resume"
+                  : "pause";
+            }}
+            onMouseDown={(event) => {
+              if (followClickIntent.current) return;
+              followClickIntent.current =
+                event.currentTarget.getAttribute("aria-label") === "Resume live following"
+                  ? "resume"
+                  : "pause";
+            }}
+            onClick={(event) => {
+              const intent =
+                followClickIntent.current ??
+                (event.currentTarget.getAttribute("aria-label") === "Resume live following"
+                  ? "resume"
+                  : "pause");
+              followClickIntent.current = undefined;
+              if (intent === "pause") {
+                liveFollow.pause();
+                return;
               }
+              onFollowLiveChange?.(true);
+              setFilter("all");
+              if (expansion.newestId) expansion.reveal(expansion.newestId, followNewest);
+              liveFollow.resume();
             }}
           >
             <span className={liveFollow.following ? s.liveDot : s.offlineDot} />
@@ -516,13 +561,57 @@ export function RunCard({
         )}
       </div>
       <LatestPublicUpdate run={run} compact />
+      <section
+        className={s.runStatusStrip}
+        data-run-status={run.state}
+        data-connected={run.connected || undefined}
+        aria-label="Run status"
+      >
+        <span className={s.runStatusGlyph} aria-hidden="true">
+          {running ? (
+            <Circle size={12} />
+          ) : run.state === "completed" ? (
+            <Check size={12} />
+          ) : run.state === "failed" ? (
+            <X size={12} />
+          ) : (
+            <Circle size={12} />
+          )}
+        </span>
+        <div className={s.runStatusText}>
+          <strong>
+            {running
+              ? run.connected
+                ? "Still in progress"
+                : "Connection lost"
+              : run.state === "completed"
+                ? "Completed"
+                : run.state === "interrupted"
+                  ? "Interrupted"
+                  : (stateNames[run.state] ?? run.state)}
+          </strong>
+          <span>
+            {running
+              ? run.connected
+                ? "An end has not been reported yet."
+                : "Completion is unknown. The archive is retained."
+              : run.state === "interrupted"
+                ? "Completion unknown."
+                : "Outcome reported by ChatGPT."}
+          </span>
+        </div>
+        <div className={s.runStatusMeta}>
+          {!running && run.endedAt && <Time value={run.endedAt} />}
+          {running && run.connected && run.origin === "assistant" && (
+            <button className={s.textButton} onClick={() => onSteer(run.id)}>
+              <GitBranch size={13} />
+              Steer this run
+            </button>
+          )}
+        </div>
+        {!running && run.summary && <p className={s.runStatusSummary}>{run.summary}</p>}
+      </section>
       <section className={s.activitySection} aria-label="Run activity">
-        {filtered.length > displayed.length && (
-          <button className={s.moreButton} onClick={() => setShowAll(true)}>
-            <ArrowDown size={13} />
-            <span>Show {filtered.length - displayed.length} earlier steps</span>
-          </button>
-        )}
         <div className={s.runRail}>
           {displayed.length ? (
             [...displayed]
@@ -540,49 +629,33 @@ export function RunCard({
             </p>
           )}
         </div>
-        {showAll && filtered.length > 8 && (
-          <button className={s.moreButton} onClick={() => setShowAll(false)}>
-            Show recent steps only
+        {filtered.length > displayed.length && (
+          <button
+            className={s.historyReveal}
+            onClick={() => {
+              liveFollow.pause();
+              setShowAll(true);
+            }}
+          >
+            <span className={s.historyRevealMarker} aria-hidden="true">
+              <ArrowDown size={10} />
+            </span>
+            <span>Show {filtered.length - displayed.length} earlier steps</span>
           </button>
         )}
-        {running ? (
-          <div className={s.openRun}>
-            <span className={s.openRunGlyph}>
-              <Circle size={12} />
+        {showAll && filtered.length > 8 && (
+          <button
+            className={s.historyReveal}
+            data-direction="recent"
+            onClick={() => setShowAll(false)}
+          >
+            <span className={s.historyRevealMarker} aria-hidden="true">
+              <ArrowDown size={10} />
             </span>
-            <div>
-              <strong>{run.connected ? "Still in progress" : "Connection lost"}</strong>
-              <span>
-                {run.connected
-                  ? "An end has not been reported yet."
-                  : "Completion is unknown. The archive is retained."}
-              </span>
-            </div>
-            <span className={s.grow} />
-            {run.connected && run.origin === "assistant" && (
-              <button className={s.textButton} onClick={() => onSteer(run.id)}>
-                <GitBranch size={13} />
-                Steer this run
-              </button>
-            )}
-          </div>
-        ) : (
-          <div className={`${s.endRun} ${run.state === "completed" ? s.endSuccess : ""}`}>
-            <div className={s.boundary}>
-              <span className={s.boundaryIcon}>
-                {run.state === "completed" ? <Check size={11} /> : <Circle size={11} />}
-              </span>
-              <strong>{run.state === "interrupted" ? "Interrupted" : "End"}</strong>
-              <span>
-                {run.state === "interrupted" ? "Completion unknown" : "Outcome reported by ChatGPT"}
-              </span>
-              <i />
-              {run.endedAt && <Time value={run.endedAt} />}
-            </div>
-            {run.summary && <p>{run.summary}</p>}
-          </div>
+            <span>Show recent steps only</span>
+          </button>
         )}
-        <div className={s.boundary}>
+        <div className={s.boundary} data-run-boundary="start">
           <span className={s.boundaryIcon}>
             <Play size={10} />
           </span>

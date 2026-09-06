@@ -3,9 +3,21 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 export type RunOutcome = "completed" | "failed" | "cancelled";
 export type NoteKind = "plan" | "progress" | "decision";
+export type BackgroundProcessPolicy = "cleanup" | "keep";
 export type SteeringTaskStatus = "queued" | "in_progress" | "paused" | "completed" | "cancelled";
 export interface SteeringTaskUpdate { id: string; status: SteeringTaskStatus; note?: string | undefined; }
-export interface RunTodo { id: string; title: string; status: SteeringTaskStatus; note?: string; steeringId?: string; updatedAt: string; }
+export interface RunTodo {
+  id: string;
+  title: string;
+  status: SteeringTaskStatus;
+  note?: string;
+  steeringId?: string;
+  createdAt: string;
+  updatedAt: string;
+  activeElapsedMs: number;
+  activeStartedAt?: string;
+  endedAt?: string;
+}
 export interface TodoUpdate { id: string; title?: string | undefined; status: SteeringTaskStatus; note?: string | undefined; steeringId?: string | undefined; }
 export interface SteeringMessage {
   id: string;
@@ -28,6 +40,7 @@ export interface WorkerRun {
   endedAt?: string;
   summary?: string;
   contextScope: "session" | "runtime";
+  backgroundProcessPolicy: BackgroundProcessPolicy;
   steering: SteeringMessage[];
   todos: RunTodo[];
 }
@@ -72,9 +85,15 @@ export class RunTracker {
     return this.activeFor(owner) ?? this.create(owner, null, "Goal not reported", "observed");
   }
 
-  private create(owner: string, goal: string | null, title: string, origin: WorkerRun["origin"]): WorkerRun {
+  private create(
+    owner: string,
+    goal: string | null,
+    title: string,
+    origin: WorkerRun["origin"],
+    backgroundProcessPolicy: BackgroundProcessPolicy = "cleanup",
+  ): WorkerRun {
     const run: WorkerRun = { id: randomUUID(), goal, title, origin, state: "running", startedAt: new Date().toISOString(),
-      contextScope: owner === "runtime" ? "runtime" : "session", steering: [], todos: [] };
+      contextScope: owner === "runtime" ? "runtime" : "session", backgroundProcessPolicy, steering: [], todos: [] };
     this.emit("run.started", { run }, run.id);
     this.entries.set(run.id, { run, owner, active: 0 });
     this.current.set(owner, run.id);
@@ -82,7 +101,12 @@ export class RunTracker {
     return run;
   }
 
-  start(owner: string, goal: string, title?: string): WorkerRun {
+  start(
+    owner: string,
+    goal: string,
+    title?: string,
+    backgroundProcessPolicy: BackgroundProcessPolicy = "cleanup",
+  ): WorkerRun {
     const displayTitle = title ?? (goal.split(/\r?\n/u)[0] ?? goal).slice(0, 120);
     const active = this.activeFor(owner);
     if (active?.origin === "assistant") {
@@ -91,14 +115,27 @@ export class RunTracker {
     }
     if (active !== undefined) {
       this.emit("run.goal", { goal, title: displayTitle, origin: "assistant" }, active.id);
+      if (active.backgroundProcessPolicy !== backgroundProcessPolicy)
+        this.emit("run.processPolicy", { backgroundProcessPolicy, source: "assistant_report" }, active.id);
       active.goal = goal; active.title = displayTitle; active.origin = "assistant";
+      active.backgroundProcessPolicy = backgroundProcessPolicy;
       this.changed();
       return active;
     }
-    return this.create(owner, goal, displayTitle, "assistant");
+    return this.create(owner, goal, displayTitle, "assistant", backgroundProcessPolicy);
   }
 
-  update(owner: string, id: string, summary: string, kind: NoteKind, acknowledgements: string[] = [], goal?: string, steeringTasks: SteeringTaskUpdate[] = [], todoUpdates: TodoUpdate[] = []): WorkerRun {
+  update(
+    owner: string,
+    id: string,
+    summary: string,
+    kind: NoteKind,
+    acknowledgements: string[] = [],
+    goal?: string,
+    steeringTasks: SteeringTaskUpdate[] = [],
+    todoUpdates: TodoUpdate[] = [],
+    backgroundProcessPolicy?: BackgroundProcessPolicy,
+  ): WorkerRun {
     const { run } = this.entry(id, owner);
     if (run.state !== "running") throw new Error("RUN_ALREADY_ENDED");
     // Validate the whole acknowledgement set before changing any message state.
@@ -140,16 +177,60 @@ export class RunTracker {
       message.taskStatus = update.status; message.taskNote = note; message.taskUpdatedAt = timestamp;
     }
     for (const update of proposed) {
-      const todo: RunTodo = { id: update.id, title: update.title, status: update.status, note: update.note ?? summary, ...(update.steeringId === undefined ? {} : { steeringId: update.steeringId }), updatedAt: timestamp };
-      const index = run.todos.findIndex((item) => item.id === todo.id);
+      const index = run.todos.findIndex((item) => item.id === update.id);
       const old = run.todos[index];
-      if (old && old.status === todo.status && old.title === todo.title && old.note === todo.note && old.steeringId === todo.steeringId) continue;
+      const note = update.note ?? summary;
+      if (
+        old &&
+        old.status === update.status &&
+        old.title === update.title &&
+        old.note === note &&
+        old.steeringId === update.steeringId
+      )
+        continue;
+      const terminal = ["completed", "cancelled"].includes(update.status);
+      const previousElapsedMs = old?.activeElapsedMs ?? 0;
+      const wasActive = old?.status === "in_progress" && old.activeStartedAt !== undefined;
+      const activeElapsedMs =
+        wasActive && update.status !== "in_progress"
+          ? previousElapsedMs + Math.max(0, Date.parse(timestamp) - Date.parse(old.activeStartedAt!))
+          : previousElapsedMs;
+      const activeStartedAt =
+        update.status === "in_progress"
+          ? old?.status === "in_progress" && old.activeStartedAt
+            ? old.activeStartedAt
+            : timestamp
+          : undefined;
+      const todo: RunTodo = {
+        id: update.id,
+        title: update.title,
+        status: update.status,
+        note,
+        ...(update.steeringId === undefined ? {} : { steeringId: update.steeringId }),
+        createdAt: old?.createdAt ?? timestamp,
+        updatedAt: timestamp,
+        activeElapsedMs,
+        ...(activeStartedAt === undefined ? {} : { activeStartedAt }),
+        ...(terminal
+          ? {
+              endedAt:
+                old && ["completed", "cancelled"].includes(old.status) && old.endedAt
+                  ? old.endedAt
+                  : timestamp,
+            }
+          : {}),
+      };
       this.emit("run.todoUpdated", { todo, source: "assistant_report" }, id);
-      if (index < 0) run.todos.push(todo); else run.todos[index] = todo;
+      if (index < 0) run.todos.push(todo);
+      else run.todos[index] = todo;
     }
     if (goal !== undefined) {
       this.emit("run.goal", { goal, title: run.title, origin: "assistant" }, id);
       run.goal = goal;
+    }
+    if (backgroundProcessPolicy !== undefined && backgroundProcessPolicy !== run.backgroundProcessPolicy) {
+      this.emit("run.processPolicy", { backgroundProcessPolicy, source: "assistant_report" }, id);
+      run.backgroundProcessPolicy = backgroundProcessPolicy;
     }
     this.changed();
     return run;
@@ -167,11 +248,15 @@ export class RunTracker {
     if (outcome === "completed" && run.todos.some((todo) => !["completed", "cancelled"].includes(todo.status))) throw new Error("RUN_TODOS_UNFINISHED");
     if (outcome === "completed") this.requireTodoList(id);
     const endedAt = new Date().toISOString();
-    this.emit("run.ended", { state: outcome, summary, endedAt, source: "assistant_report", backgroundProcesses }, id);
+    this.emit("run.ended", { state: outcome, summary, endedAt, source: "assistant_report", backgroundProcesses, backgroundProcessPolicy: run.backgroundProcessPolicy }, id);
     run.state = outcome; run.endedAt = endedAt; run.summary = summary;
     if (this.current.get(owner) === id) this.current.delete(owner);
     this.changed();
     return run;
+  }
+
+  backgroundProcessPolicy(owner: string, id: string): BackgroundProcessPolicy {
+    return this.entry(id, owner).run.backgroundProcessPolicy;
   }
 
   enter(id: string): () => void {

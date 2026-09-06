@@ -211,6 +211,7 @@ export function parseRun(value: unknown, runtimeId: string): RunItem | undefined
     endedAt: typeof run.endedAt === "string" ? run.endedAt : undefined,
     summary: typeof run.summary === "string" ? run.summary : undefined,
     backgroundProcesses: 0,
+    backgroundProcessPolicy: run.backgroundProcessPolicy === "keep" ? "keep" : "cleanup",
     contextScope: string(run.contextScope, "runtime"),
     notes: [],
     steering: Array.isArray(run.steering) ? (run.steering as SteeringItem[]) : [],
@@ -251,6 +252,10 @@ export class TimelineIndex {
           message.taskUpdatedAt = string(detail.updatedAt);
         }
       }
+      if (event.type === "run.processPolicy") {
+        run.backgroundProcessPolicy =
+          detail.backgroundProcessPolicy === "keep" ? "keep" : "cleanup";
+      }
       if (event.type === "run.goal") {
         run.goal = string(detail.goal);
         run.title = string(detail.title, run.title);
@@ -268,6 +273,11 @@ export class TimelineIndex {
         run.endedAt = string(detail.endedAt, event.timestamp);
         run.summary = string(detail.summary);
         run.backgroundProcesses = Number(detail.backgroundProcesses ?? 0);
+        if (
+          detail.backgroundProcessPolicy === "keep" ||
+          detail.backgroundProcessPolicy === "cleanup"
+        )
+          run.backgroundProcessPolicy = detail.backgroundProcessPolicy;
       }
       if (event.type === "steering.queued") {
         const message = detail.message as SteeringItem;

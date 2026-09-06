@@ -28,7 +28,7 @@ const SERVER_INSTRUCTIONS = [
   "Before substantive work, publish a nonempty run.update.todos list with stable IDs. Keep queued, in_progress, paused, completed, or cancelled states explicit. Report steering implementation separately with steeringTasks; acknowledgement is not completion. Unfinished work remains in every subsequent tool response and prevents a completed run.",
   "Publish run.update at meaningful milestones, before long operations, and when your approach changes. These are concise public plans/progress/decision summaries, never private chain-of-thought or an invented thinking stream.",
   "Local user steering is returned in tool-response text. Before further actions, acknowledge the returned steering message IDs using run.update and explain how you will adapt, subject to existing permissions and safety rules.",
-  "Before your final answer, call run.finish with a truthful completed, failed, or cancelled outcome and summary. Never infer completion from inactivity; background services may remain running and are reported separately.",
+  "Before your final answer, call run.finish with a truthful completed, failed, or cancelled outcome and summary. Completed runs stop their owned background processes by default; set backgroundProcessPolicy=keep only when a persistent server/service is an intentional user deliverable. Never infer completion from inactivity.",
   "Name the exact Local Dev tool, executable path, and command arguments being used; do not mask, summarize, or omit tool inputs in status updates.",
   "Before the first tool call in a multi-step workflow, send a concise update naming the immediate next action.",
   "After each meaningful milestone or roughly every three tool calls, send another concise update with what finished and what comes next.",
@@ -45,7 +45,7 @@ const SERVER_INSTRUCTIONS = [
   "Project activation synchronizes configured downstream project bindings.",
   "Prefer downstream semantic code tools for navigation and precise edits.",
   "Use dev.run for one direct argv command or dev.batch for bounded sequential commands; never invoke a shell with evaluation flags.",
-  "Use relative cwd for monorepo subdirectories, dev.poll for the single background process, and dev.stop to terminate it.",
+  "Use relative cwd for monorepo subdirectories. After dev.run with background=true, use dev.poll to inspect the single tracked background process and dev.stop to terminate it. When you only need completion, prefer dev.poll with a bounded waitMs instead of repeated immediate polls; use waitMs=0 only for output or URL inspection. Do not run sleep or manual ps loops solely to wait.",
   "After all file-changing operations for a user request, run the repository check and call dev.diff at most once.",
 ].join(" ");
 
@@ -85,7 +85,13 @@ export async function runServer(): Promise<void> {
   const registry = new ToolRegistry();
   registry.addAll(coreTools(runtime));
   registry.add(askTool(activity));
-  registry.addAll(runTools(activity.runs, (id) => activity.backgroundCount(id)));
+  registry.addAll(
+    runTools(
+      activity.runs,
+      (id) => activity.backgroundCount(id),
+      async (id) => await activity.stopProcessesForRun(id),
+    ),
+  );
   registry.addAll(downstreamEntries);
   registry.addAll(chromeCompatibilityEntries(downstream));
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: registry.list() }));

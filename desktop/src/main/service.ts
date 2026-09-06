@@ -246,7 +246,7 @@ export class DesktopService {
           }
         : this.health,
       platform: process.platform,
-      version: "0.7.0",
+      version: "0.7.9",
       systemClock: this.systemClock,
     };
   }

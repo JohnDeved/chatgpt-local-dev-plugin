@@ -271,3 +271,142 @@ test("real stdio client receives locally queued steering, acknowledges, and fini
     throw new Error(`Run integration failed. Child diagnostics: ${stderr}`, { cause: error });
   } finally { control?.close(); await client.close(); await rm(home, { recursive: true, force: true }); }
 });
+
+
+test("real stdio completed runs clean background processes while keep preserves intentional services", { timeout: 20000 }, async () => {
+  const home = await mkdtemp(join(tmpdir(), "run-process-lifecycle-"));
+  const entry = new URL("../dist/server.js", import.meta.url).href;
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["--input-type=module", "-e", `import { runServer } from ${JSON.stringify(entry)}; runServer().catch(error => { console.error(error); process.exitCode = 1; });`],
+    env: { ...process.env, HOME: home },
+    stderr: "pipe",
+  });
+  let stderr = "";
+  transport.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+  const client = new Client({ name: "run-process-policy-test", version: "1.0" });
+  let lifecycleControl;
+  try {
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await mkdir(join(home, ".local-dev"), { recursive: true });
+    await writeFile(join(home, ".codex/config.toml"), "");
+    await writeFile(
+      join(home, ".local-dev/config.json"),
+      JSON.stringify({ version: 1, projectRoots: [home], selectedServers: [], projectOpenHooks: [] }),
+    );
+    await client.connect(transport);
+
+    const cleanupStart = await client.callTool({
+      name: "run.start",
+      arguments: { goal: "Run a temporary background process and clean it up" },
+    });
+    const cleanupId = cleanupStart.structuredContent.data.run.id;
+    assert.equal(cleanupStart.structuredContent.data.run.backgroundProcessPolicy, "cleanup");
+    await client.callTool({
+      name: "run.update",
+      arguments: {
+        runId: cleanupId,
+        summary: "Start and verify a temporary process.",
+        todos: [{ id: "process", title: "Verify temporary process", status: "in_progress" }],
+      },
+    });
+    const lifecycleDirectory = join(home, ".local-dev/activity");
+    const lifecycleManifestFile = (await readdir(lifecycleDirectory)).find(
+      (name) => name.endsWith(".json") && name !== "settings.json",
+    );
+    const lifecycleManifest = JSON.parse(
+      await readFile(join(lifecycleDirectory, lifecycleManifestFile), "utf8"),
+    );
+    lifecycleControl = await localControl(lifecycleManifest.socketPath);
+    assert.equal(
+      (
+        await lifecycleControl.send("policy", {
+          autoApprove: true,
+          remember: false,
+          confirmed: true,
+        })
+      ).ok,
+      true,
+    );
+    assert.equal(
+      (await client.callTool({ name: "project.open", arguments: { query: home } })).structuredContent.ok,
+      true,
+    );
+    const cleanupProcess = await client.callTool({
+      name: "dev.run",
+      arguments: {
+        argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+        background: true,
+      },
+    });
+    assert.equal(cleanupProcess.structuredContent.ok, true);
+    const cleanupPid = cleanupProcess.structuredContent.data.pid;
+    assert.equal((await client.callTool({ name: "dev.poll", arguments: {} })).structuredContent.data.state, "running");
+    await client.callTool({
+      name: "run.update",
+      arguments: {
+        runId: cleanupId,
+        summary: "Temporary process verified.",
+        todos: [{ id: "process", status: "completed" }],
+      },
+    });
+    const cleaned = await client.callTool({
+      name: "run.finish",
+      arguments: { runId: cleanupId, outcome: "completed", summary: "Temporary process verified and cleaned up." },
+    });
+    assert.equal(cleaned.structuredContent.ok, true);
+    assert.equal(cleaned.structuredContent.data.run.state, "completed");
+    assert.equal((await client.callTool({ name: "dev.poll", arguments: {} })).structuredContent.data.state, "exited");
+    assert.throws(() => process.kill(cleanupPid, 0), /ESRCH/u);
+
+    const keepStart = await client.callTool({
+      name: "run.start",
+      arguments: {
+        goal: "Leave a preview service running for the user",
+        backgroundProcessPolicy: "keep",
+      },
+    });
+    const keepId = keepStart.structuredContent.data.run.id;
+    assert.equal(keepStart.structuredContent.data.run.backgroundProcessPolicy, "keep");
+    await client.callTool({
+      name: "run.update",
+      arguments: {
+        runId: keepId,
+        summary: "Start the persistent preview service.",
+        todos: [{ id: "service", title: "Start preview service", status: "in_progress" }],
+      },
+    });
+    const keepProcess = await client.callTool({
+      name: "dev.run",
+      arguments: {
+        argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+        background: true,
+      },
+    });
+    assert.equal(keepProcess.structuredContent.ok, true);
+    const keepPid = keepProcess.structuredContent.data.pid;
+    await client.callTool({
+      name: "run.update",
+      arguments: {
+        runId: keepId,
+        summary: "Preview service is ready for the user.",
+        todos: [{ id: "service", status: "completed" }],
+      },
+    });
+    const kept = await client.callTool({
+      name: "run.finish",
+      arguments: { runId: keepId, outcome: "completed", summary: "Preview service is ready and intentionally left running." },
+    });
+    assert.equal(kept.structuredContent.ok, true);
+    assert.equal(kept.structuredContent.data.run.backgroundProcessPolicy, "keep");
+    assert.equal((await client.callTool({ name: "dev.poll", arguments: {} })).structuredContent.data.state, "running");
+    assert.doesNotThrow(() => process.kill(keepPid, 0));
+    assert.equal((await client.callTool({ name: "dev.stop", arguments: {} })).structuredContent.ok, true);
+  } catch (error) {
+    throw new Error(`Run process lifecycle integration failed. Child diagnostics: ${stderr}`, { cause: error });
+  } finally {
+    lifecycleControl?.close();
+    await client.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  }
+});

@@ -114,11 +114,30 @@ test("one run and one command collect their lifecycle without guessed completion
   assert.equal(call.commands[0].output.stderr, "notice\n");
   assert.equal(call.commands[0].exitCode, 0);
   assert.equal(index.runs.get("fixture:run-1").state, "running");
+  assert.equal(index.runs.get("fixture:run-1").backgroundProcessPolicy, "cleanup");
   index.accept(
-    event("run.ended", { state: "completed", summary: "Verified" }, 8, { runId: "run-1" }),
+    event("run.processPolicy", { backgroundProcessPolicy: "keep", source: "assistant_report" }, 8, {
+      runId: "run-1",
+    }),
   );
-  index.accept(event("runtime.closed", {}, 9));
+  assert.equal(index.runs.get("fixture:run-1").backgroundProcessPolicy, "keep");
+  index.accept(
+    event(
+      "run.ended",
+      {
+        state: "completed",
+        summary: "Verified",
+        backgroundProcesses: 1,
+        backgroundProcessPolicy: "keep",
+      },
+      9,
+      { runId: "run-1" },
+    ),
+  );
+  index.accept(event("runtime.closed", {}, 10));
   assert.equal(index.runs.get("fixture:run-1").state, "completed");
+  assert.equal(index.runs.get("fixture:run-1").backgroundProcesses, 1);
+  assert.equal(index.runs.get("fixture:run-1").backgroundProcessPolicy, "keep");
 });
 
 test("preview limits are explicit and command streams stay separate", () => {

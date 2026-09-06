@@ -141,6 +141,12 @@ test("production stdio server exposes tool-only native tools with ChatGPT status
       assert.equal(tool._meta.ui, undefined);
       assert.equal(tool._meta["openai/outputTemplate"], undefined);
     }
+    const poll = listed.result.tools.find((tool) => tool.name === "dev.poll");
+    assert.match(poll.description, /after dev\.run with background=true/u);
+    assert.match(poll.description, /waitMs/u);
+    assert.equal(poll.inputSchema.properties.waitMs.maximum, 120_000);
+    assert.match(initialized.result.instructions, /prefer dev\.poll with a bounded waitMs instead of repeated immediate polls/u);
+    assert.match(initialized.result.instructions, /do not run sleep or manual ps loops solely to wait/iu);
     const ask = listed.result.tools.find((tool) => tool.name === "ask");
     assert.equal(ask.annotations.readOnlyHint, true);
     assert.match(ask.description, /90 seconds/u);
@@ -285,6 +291,31 @@ test("opens a configured project and runs argv without a shell", async () => {
     });
     assert.equal(batch.result.structuredContent.ok, true);
     assert.equal(batch.result.structuredContent.data.steps.length, 2);
+    const background = await client.request("tools/call", {
+      name: "dev.run",
+      arguments: {
+        argv: [
+          process.execPath,
+          "-e",
+          "setTimeout(() => { process.stdout.write('waited'); }, 120)",
+        ],
+        background: true,
+      },
+    });
+    assert.equal(background.result.structuredContent.data.state, "running");
+    const waitedAt = Date.now();
+    const waited = await client.request("tools/call", {
+      name: "dev.poll",
+      arguments: { waitMs: 2_000 },
+    });
+    assert.equal(waited.result.structuredContent.data.state, "exited");
+    assert.equal(waited.result.structuredContent.data.outputTail, "waited");
+    assert.ok(Date.now() - waitedAt >= 80);
+    const invalidWait = await client.request("tools/call", {
+      name: "dev.poll",
+      arguments: { waitMs: 120_001 },
+    });
+    assert.equal(invalidWait.result.structuredContent.error.code, "INVALID_ARGUMENTS");
     const missing = await client.request("tools/call", {
       name: "dev.run",
       arguments: { argv: [join(home, "does-not-exist")] },

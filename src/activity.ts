@@ -57,7 +57,7 @@ interface OwnedProcess {
   argv: string[];
   cwd: string;
   startedAt: string;
-  stop: () => void;
+  stop: () => Promise<boolean>;
 }
 
 interface ActivityScope {
@@ -343,7 +343,7 @@ export class ActivityHub {
         const owned = this.processes.get(request.processId);
         if (owned === undefined) throw new Error("PROCESS_NOT_RUNNING");
         this.record("process.stopRequested", { processId: owned.id, pid: owned.pid }, owned.operationId);
-        owned.stop();
+        void owned.stop();
         break;
       }
       case "stopAll":
@@ -355,7 +355,7 @@ export class ActivityHub {
           operation.state = "stopping";
           operation.controller.abort(new Error("OPERATION_CANCELLED"));
         }
-        for (const owned of this.processes.values()) owned.stop();
+        for (const owned of this.processes.values()) void owned.stop();
         break;
       case "hello":
         this.record("viewer.connected", { client: request.client, pid: request.pid });
@@ -438,7 +438,7 @@ export class ActivityHub {
     }
     this.asks.clear();
     for (const operation of this.operations.values()) operation.controller.abort(new Error("ACTIVITY_CAPTURE_UNAVAILABLE"));
-    for (const owned of this.processes.values()) { try { owned.stop(); } catch { /* Remain faulted. */ } }
+    for (const owned of this.processes.values()) void owned.stop().catch(() => undefined);
     this.broadcastState();
   }
 
@@ -538,6 +538,24 @@ export class ActivityHub {
     return [...this.processes.values()].filter((owned) => owned.runId === runId).length;
   }
 
+  async stopProcessesForRun(runId: string): Promise<{ requested: number; stopped: number; remaining: number }> {
+    const owned = [...this.processes.values()].filter((process_) => process_.runId === runId);
+    const results = await Promise.all(owned.map(async (process_) => ({
+      id: process_.id,
+      confirmed: await process_.stop(),
+    })));
+    const stopped = results.filter((result) => result.confirmed).length;
+    const remaining = this.backgroundCount(runId);
+    this.record(
+      "run.processCleanup",
+      { requested: owned.length, stopped, remaining, source: "run_finish" },
+      undefined,
+      undefined,
+      runId,
+    );
+    return { requested: owned.length, stopped, remaining };
+  }
+
   async elicit(params: ElicitRequest["params"], fallback: () => Promise<ElicitResult>): Promise<ElicitResult> {
     const schema = "requestedSchema" in params ? params.requestedSchema : undefined;
     const properties = isRecord(schema) && isRecord(schema.properties) ? schema.properties : undefined;
@@ -571,7 +589,7 @@ export class ActivityHub {
     }
     this.asks.clear();
     for (const operation of this.operations.values()) operation.controller.abort(new Error("RUNTIME_CLOSED"));
-    for (const owned of this.processes.values()) owned.stop();
+    await Promise.allSettled([...this.processes.values()].map(async (owned) => await owned.stop()));
     if (this.fault === null) {
       this.runs.interrupt();
       this.record("runtime.closed", { remainingProcesses: this.processes.size });
