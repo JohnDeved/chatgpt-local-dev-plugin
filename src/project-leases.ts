@@ -25,13 +25,15 @@ const idle = (lease: Lease): boolean => lease.operations.length === 0 && lease.b
 export async function projectScope(path: string): Promise<Scope> {
   const canonical = await realpath(path), info = await stat(canonical, { bigint: true });
   if (!info.isDirectory()) throw new LeaseError("INVALID_PROJECT_PATH");
-  const result = await runCommand("git", ["--no-optional-locks", "-C", canonical, "rev-parse", "--verify", "HEAD"], 3000);
-  if (result.code !== 0 && result.code !== 128) throw new LeaseError("PROJECT_IDENTITY_UNVERIFIED");
-  const head = result.code === 0 ? result.stdout.trim() : null;
+  const top = await runCommand("git", ["--no-optional-locks", "-C", canonical, "rev-parse", "--show-toplevel"], 3000);
+  if (top.code !== 0 && top.code !== 128) throw new LeaseError("PROJECT_IDENTITY_UNVERIFIED");
+  const result = top.code === 0
+    ? await runCommand("git", ["--no-optional-locks", "-C", canonical, "rev-parse", "--verify", "HEAD"], 3000)
+    : null;
+  if (result !== null && result.code !== 0 && result.code !== 128) throw new LeaseError("PROJECT_IDENTITY_UNVERIFIED");
+  const head = result?.code === 0 ? result.stdout.trim() : null;
   if (head !== null && !/^[a-f0-9]{40,64}$/u.test(head)) throw new LeaseError("PROJECT_IDENTITY_UNVERIFIED");
-  const top = head === null ? null : await runCommand("git", ["--no-optional-locks", "-C", canonical, "rev-parse", "--show-toplevel"], 3000);
-  if (top && top.code !== 0) throw new LeaseError("PROJECT_IDENTITY_UNVERIFIED");
-  const writeDomain = top ? await realpath(top.stdout.trim()) : canonical, domain = await stat(writeDomain, { bigint: true });
+  const writeDomain = top.code === 0 ? await realpath(top.stdout.trim()) : canonical, domain = await stat(writeDomain, { bigint: true });
   return { path: canonical, device: String(info.dev), inode: String(info.ino), head, writeDomain, domainDevice: String(domain.dev), domainInode: String(domain.ino) };
 }
 function matches(actual: Scope, expected: Scope, head: boolean): void {

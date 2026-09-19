@@ -206,6 +206,16 @@ test("sibling directories share a Git write domain while separate worktrees do n
   assert.equal((await open(b, other, "write")).ok, true);
 });
 
+test("sibling directories in an unborn Git worktree share one write domain", async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.source, "a")); await mkdir(join(f.source, "b"));
+  execFileSync("git", ["-C", f.source, "init", "-q"]);
+  const a = await f.client("writer-a"), b = await f.client("writer-b");
+  const first = await open(a, join(f.source, "a"), "write"); assert.equal(first.ok, true);
+  assert.equal(first.value.lease.scope.writeDomain, f.source);
+  assert.equal((await open(b, join(f.source, "b"), "write")).code, "PROJECT_IN_USE");
+});
+
 test("uncommitted idle reservation from a voluntarily exited process is reclaimable", async t => {
   const f = await fixture(t), a = await f.client("pending"), b = await f.client("successor");
   const pending = await a.call("reserve", { path: f.source, options: { mode: "write" } }); assert.equal(pending.ok, true);

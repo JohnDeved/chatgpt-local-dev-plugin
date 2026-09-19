@@ -290,11 +290,11 @@ interface BackgroundOwnership {
 
 export class CoreRuntime {
   private readonly activeProjects = new Map<string, ActiveProject>();
-  private readonly processes = new ProcessManager();
   private readonly temporaryProjects = new Set<string>();
   private backgroundOwnership: BackgroundOwnership | undefined;
   private backgroundPin: { session: string; generation: string; operation: string; pid: number } | undefined;
   private backgroundCleanup: Promise<void> | undefined;
+  private readonly foregroundPins = new Map<number, { session: string; generation: string; operation: string; background: boolean }>();
   private backgroundQueue: Promise<void> = Promise.resolve();
   private backgroundSequence = 0;
   private closing = false;
@@ -309,6 +309,7 @@ export class CoreRuntime {
     private readonly projectBindings: ProjectBinding[] = [],
     private readonly invokeBinding?: ProjectBindingInvoker,
     private readonly leases?: ProjectLeases,
+    private readonly processes: ProcessManager = new ProcessManager(),
   ) {}
 
   private async serializeBackground<T>(action: () => Promise<T>): Promise<T> {
@@ -651,22 +652,24 @@ export class CoreRuntime {
 
   async releaseProject(generation: string, session = "runtime"): Promise<ToolCallResult> {
     if (this.closing) return failure("project.release", "RUNTIME_CLOSING", "The runtime is closing and cannot start new work.");
-    if (this.leases === undefined) return failure("project.release", "LEASES_UNAVAILABLE", "Project leasing is not configured.");
-    const project = this.activeProjects.get(session);
-    if (project === undefined) return failure("project.release", "NO_ACTIVE_PROJECT", "The authenticated session has no active project lease.");
-    if (project.generation !== generation) {
-      return failure("project.release", "LEASE_GENERATION_MISMATCH", "The supplied generation does not match the authenticated session's active lease.", {
-        expected: project.generation ?? null,
-        actual: generation,
-      });
-    }
     const finish = this.trackRuntimeTask();
     try {
-      try {
-        const released = await this.leases.release(session, generation);
-        this.activeProjects.delete(session);
-        return success("project.release", released as unknown as JsonValue, `relinquished generation=${generation}`);
-      } catch (error) { return leaseFailure("project.release", error); }
+      return await this.serializeProject(session, async () => {
+        if (this.leases === undefined) return failure("project.release", "LEASES_UNAVAILABLE", "Project leasing is not configured.");
+        const project = this.activeProjects.get(session);
+        if (project === undefined) return failure("project.release", "NO_ACTIVE_PROJECT", "The authenticated session has no active project lease.");
+        if (project.generation !== generation) {
+          return failure("project.release", "LEASE_GENERATION_MISMATCH", "The supplied generation does not match the authenticated session's active lease.", {
+            expected: project.generation ?? null,
+            actual: generation,
+          });
+        }
+        try {
+          const released = await this.leases.release(session, generation);
+          if (this.activeProjects.get(session)?.generation === generation) this.activeProjects.delete(session);
+          return success("project.release", released as unknown as JsonValue, `relinquished generation=${generation}`);
+        } catch (error) { return leaseFailure("project.release", error); }
+      });
     } finally { finish(); }
   }
 
@@ -720,6 +723,7 @@ export class CoreRuntime {
     const stopHeartbeat = background ? () => undefined : commandHeartbeat(progress, label);
     let operation: string | undefined;
     let backgroundRetained = false;
+    let unconfirmedForeground: ProcessSnapshot | undefined;
     try {
       await progress?.report(background ? `Starting ${label} in the background…` : `Running ${label}…`, 0.1);
       if (this.leases !== undefined && activeProject.generation !== undefined) {
@@ -750,6 +754,7 @@ export class CoreRuntime {
       if (error instanceof LeaseError) return leaseFailure("dev.run", error);
       const code = error instanceof Error ? error.message : "COMMAND_FAILED";
       const snapshot = errorSnapshot(error);
+      if (code === "COMMAND_STOP_UNCONFIRMED") unconfirmedForeground = snapshot;
       if (code === "COMMAND_TIMEOUT") {
         await progress?.report(`${label} timed out and was stopped`, 0.9);
         return failure(
@@ -786,7 +791,20 @@ export class CoreRuntime {
           backgroundRetained = true;
         }).catch(() => undefined);
       }
-      if (operation !== undefined && this.leases !== undefined && activeProject.generation !== undefined) {
+      if (unconfirmedForeground?.pid !== null && unconfirmedForeground?.pid !== undefined && operation !== undefined && this.leases !== undefined && activeProject.generation !== undefined) {
+        const pid = unconfirmedForeground.pid;
+        const retainedOperation = operation;
+        const pin = { session, generation: activeProject.generation, operation: retainedOperation, background: false };
+        this.foregroundPins.set(pid, pin);
+        await this.leases.complete(session, pin.generation, retainedOperation, [pid]).then(() => {
+          pin.background = true;
+          operation = undefined;
+        }).catch(() => undefined);
+      }
+      const foregroundRetained = unconfirmedForeground?.pid !== null
+        && unconfirmedForeground?.pid !== undefined
+        && this.foregroundPins.has(unconfirmedForeground.pid);
+      if (!foregroundRetained && operation !== undefined && this.leases !== undefined && activeProject.generation !== undefined) {
         await this.leases.complete(session, activeProject.generation, operation).catch(() => undefined);
       }
       if (ownsBackground && ownership !== undefined) {
@@ -915,11 +933,20 @@ export class CoreRuntime {
     const closeTask = this.serializeBackground(async () => {
       const ownership = this.backgroundOwnership;
       if (ownership?.starting === true) await ownership.settled;
-      const background = await this.processes.close();
+      const processes = await this.processes.close();
+      const background = processes.background;
       await this.clearBackgroundPin(background);
       if (background.state !== "running") {
         this.processes.discardBackground(background.pid);
         this.backgroundOwnership = undefined;
+      }
+      for (const foreground of processes.foreground) {
+        if (foreground.state === "running" || foreground.pid === null) continue;
+        const pin = this.foregroundPins.get(foreground.pid);
+        if (pin === undefined || this.leases === undefined) continue;
+        if (pin.background) await this.leases.backgroundExited(pin.session, pin.generation, pin.operation, foreground.pid);
+        else await this.leases.complete(pin.session, pin.generation, pin.operation);
+        this.foregroundPins.delete(foreground.pid);
       }
       await Promise.all([...this.runningTasks]);
       if (this.leases !== undefined) {
@@ -933,6 +960,10 @@ export class CoreRuntime {
       this.temporaryProjects.clear();
     });
     this.closeTask = closeTask;
-    return await closeTask;
+    try { return await closeTask; }
+    catch (error) {
+      if (this.closeTask === closeTask) this.closeTask = undefined;
+      throw error;
+    }
   }
 }

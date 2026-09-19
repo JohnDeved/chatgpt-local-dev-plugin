@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
+import { ProcessManager } from "../dist/core/process.js";
 import { CoreRuntime } from "../dist/core/runtime.js";
 import { ProjectLeases } from "../dist/project-leases.js";
 
@@ -240,6 +241,64 @@ test("concurrent opens in one session serialize without stranding a generation",
   assert.equal(acquired.structuredContent.ok, true, JSON.stringify(acquired.structuredContent));
   const blocked = await successor.openProject(evidence, "error", undefined, "successor", { mode: "write" });
   assert.equal(blocked.structuredContent.error.code, "PROJECT_IN_USE");
+});
+
+test("concurrent release and open serialize without stranding the replacement", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-release-open-race-")));
+  const source = join(home, "projects/source"), evidence = join(home, "projects/evidence"), registry = join(home, "registry");
+  await mkdir(source, { recursive: true }); await mkdir(evidence, { recursive: true });
+  const leases = new ProjectLeases(registry);
+  const runtime = new CoreRuntime([join(home, "projects")], [], [], undefined, leases);
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  t.after(async () => {
+    await runtime.close().catch(() => undefined); await successor.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+  const opened = await runtime.openProject(source, "error", undefined, "worker", { mode: "write" });
+  assert.equal(opened.structuredContent.ok, true);
+  const generation = opened.structuredContent.data.generation;
+  const originalRelease = leases.release.bind(leases);
+  let releaseEntered, allowRelease;
+  const entered = new Promise(resolve => { releaseEntered = resolve; });
+  const gate = new Promise(resolve => { allowRelease = resolve; });
+  leases.release = async (...args) => { releaseEntered(); await gate; return await originalRelease(...args); };
+
+  const releasing = runtime.releaseProject(generation, "worker");
+  await entered;
+  const opening = runtime.openProject(evidence, "error", undefined, "worker", { mode: "write" });
+  await delay(50);
+  assert.equal(runtime.currentProject("worker").structuredContent.data.path, source);
+  allowRelease();
+  assert.equal((await releasing).structuredContent.ok, true);
+  assert.equal((await opening).structuredContent.ok, true);
+  assert.equal(runtime.currentProject("worker").structuredContent.data.path, evidence);
+  assert.equal((await successor.openProject(source, "error", undefined, "successor", { mode: "write" })).structuredContent.ok, true);
+  assert.equal((await successor.openProject(evidence, "error", undefined, "successor", { mode: "write" })).structuredContent.error.code, "PROJECT_IN_USE");
+});
+
+test("unconfirmed foreground groups keep ownership pinned until cooperative retry", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-unconfirmed-foreground-")));
+  const source = join(home, "projects/source"), registry = join(home, "registry");
+  await mkdir(source, { recursive: true });
+  let terminationConfirmed = false;
+  const processes = new ProcessManager(async () => terminationConfirmed);
+  const runtime = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry), processes);
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  t.after(async () => {
+    terminationConfirmed = true;
+    await runtime.close().catch(() => undefined); await successor.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+  const opened = await runtime.openProject(source, "error", undefined, "worker", { mode: "write" });
+  assert.equal(opened.structuredContent.ok, true);
+  const generation = opened.structuredContent.data.generation;
+  const run = await runtime.run([process.execPath, "-e", "process.exit(0)"], false, undefined, undefined, false, undefined, "worker");
+  assert.equal(run.structuredContent.error.code, "COMMAND_STOP_UNCONFIRMED");
+  assert.equal((await runtime.releaseProject(generation, "worker")).structuredContent.error.code, "PROJECT_HAS_ACTIVE_WORK");
+  assert.equal((await successor.openProject(source, "error", undefined, "successor", { mode: "write" })).structuredContent.error.code, "PROJECT_IN_USE");
+  terminationConfirmed = true;
+  await runtime.close();
+  assert.equal((await successor.openProject(source, "error", undefined, "successor", { mode: "write" })).structuredContent.ok, true);
 });
 
 test("shutdown waits for foreground operation completion before releasing the lease", { timeout: 30000 }, async t => {

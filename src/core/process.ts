@@ -62,7 +62,9 @@ function snapshot(tracked: TrackedProcess | undefined): ProcessSnapshot {
   };
 }
 
-function start(argv: string[], cwd: string, background: boolean): TrackedProcess {
+type CommandTerminator = (child: SpawnedCommand) => Promise<boolean>;
+
+function start(argv: string[], cwd: string, background: boolean, terminate: CommandTerminator): TrackedProcess {
   const child = spawnCommand(argv, cwd);
   let resolveExit: () => void = () => undefined;
   let resolveStarted: (started: boolean) => void = () => undefined;
@@ -85,7 +87,7 @@ function start(argv: string[], cwd: string, background: boolean): TrackedProcess
   child.on("spawn", () => resolveStarted(true));
   child.on("close", (code, signal) => {
     tracked.exitCode = code; tracked.signal = signal;
-    void terminateCommand(child).then((confirmed) => {
+    void terminate(child).then((confirmed) => {
       if (confirmed) tracked.finishedAt = new Date().toISOString();
       resolveExit();
     }, () => resolveExit());
@@ -105,6 +107,8 @@ export class ProcessManager {
   private closing = false;
   private readonly foreground = new Set<TrackedProcess>();
 
+  constructor(private readonly terminate: CommandTerminator = terminateCommand) {}
+
   hasRunningBackground(): boolean {
     return this.background !== undefined && snapshot(this.background).state === "running";
   }
@@ -116,7 +120,7 @@ export class ProcessManager {
     signal?.throwIfAborted();
     if (background) {
       if (this.background !== undefined) throw new Error("BACKGROUND_BUSY");
-      this.background = start(argv, cwd, true);
+      this.background = start(argv, cwd, true, this.terminate);
       if (!(await this.background.started)) {
         await this.background.exited;
         this.background = undefined;
@@ -124,7 +128,7 @@ export class ProcessManager {
       }
       return snapshot(this.background);
     }
-    const tracked = start(argv, cwd, false);
+    const tracked = start(argv, cwd, false, this.terminate);
     this.foreground.add(tracked);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let abort: () => void = () => undefined;
@@ -140,9 +144,12 @@ export class ProcessManager {
       });
       const result = await Promise.race([tracked.exited.then(() => "exit" as const), timeout, cancelled]);
       if (result !== "exit" || signal?.aborted) {
-        const confirmed = await terminateCommand(tracked.child);
+        const confirmed = await this.terminate(tracked.child);
         const code = !confirmed ? "COMMAND_STOP_UNCONFIRMED" : result === "timeout" ? "COMMAND_TIMEOUT" : "OPERATION_CANCELLED";
         throw Object.assign(new Error(code), { snapshot: snapshot(tracked) });
+      }
+      if (tracked.finishedAt === null) {
+        throw Object.assign(new Error("COMMAND_STOP_UNCONFIRMED"), { snapshot: snapshot(tracked) });
       }
       if (tracked.spawnError) throw new Error("COMMAND_FAILED");
       return snapshot(tracked);
@@ -186,7 +193,7 @@ export class ProcessManager {
   async stop(): Promise<ProcessSnapshot> {
     const tracked = this.background;
     if (tracked === undefined) return snapshot(undefined);
-    const confirmed = await terminateCommand(tracked.child);
+    const confirmed = await this.terminate(tracked.child);
     if (confirmed && tracked.finishedAt === null) tracked.finishedAt = new Date().toISOString();
     return snapshot(tracked);
   }
@@ -198,9 +205,16 @@ export class ProcessManager {
     return true;
   }
 
-  async close(): Promise<ProcessSnapshot> {
+  async close(): Promise<{ background: ProcessSnapshot; foreground: ProcessSnapshot[] }> {
     this.closing = true;
-    await Promise.allSettled([...this.foreground].map((tracked) => terminateCommand(tracked.child)));
-    return await this.stop();
+    const foreground = await Promise.all([...this.foreground].map(async (tracked) => {
+      const confirmed = await this.terminate(tracked.child).catch(() => false);
+      if (confirmed) {
+        if (tracked.finishedAt === null) tracked.finishedAt = new Date().toISOString();
+        this.foreground.delete(tracked);
+      }
+      return snapshot(tracked);
+    }));
+    return { background: await this.stop(), foreground };
   }
 }
