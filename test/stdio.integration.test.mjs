@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -60,8 +61,14 @@ class McpProcess {
     this.process.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
   }
 
-  close() {
+  async close() {
+    if (this.process.exitCode !== null || this.process.signalCode !== null) return;
+    const exit = once(this.process, "exit");
     this.process.kill("SIGTERM");
+    let timer;
+    try {
+      await Promise.race([exit, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("COOPERATIVE_SHUTDOWN_FAILED")), 10_000); })]);
+    } finally { clearTimeout(timer); }
   }
 }
 
@@ -181,7 +188,7 @@ test("production stdio server exposes tool-only native tools with ChatGPT status
     assert.equal(current.result.structuredContent.data.path, null);
     assert.equal(client.stderr, "");
   } finally {
-    client.close();
+    await client.close();
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -244,7 +251,7 @@ test("streams human-readable progress for long native tools", async () => {
     assert.equal(batchUpdates.some(({ message }) => message === `Step 2/2: ${nodeVersionLabel}`), true);
     assert.equal(batchUpdates.some(({ message }) => /Completed all 2 command steps/u.test(message)), true);
   } finally {
-    client.close();
+    await client.close();
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -356,7 +363,7 @@ test("opens a configured project and runs argv without a shell", async () => {
     const extra = await client.request("tools/call", { name: "project.current", arguments: { unexpected: true } });
     assert.equal(extra.result.structuredContent.error.code, "INVALID_ARGUMENTS");
   } finally {
-    client.close();
+    await client.close();
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -371,7 +378,7 @@ test("runs argv-based project hooks before activating a project", async () => {
     assert.equal(opened.result.structuredContent.data.hooksRun, 1);
     assert.equal(await readFile(marker, "utf8"), "ok");
   } finally {
-    client.close();
+    await client.close();
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -391,7 +398,7 @@ test("synchronizes configured downstream project bindings", async () => {
       message: `active=${await realpath(project)}`,
     }]);
   } finally {
-    client.close();
+    await client.close();
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -415,7 +422,7 @@ test("project-bound downstream tools rebind and guard each authenticated session
     assert.equal((await call("one", "fixture.echo", { value: "again" })).result.structuredContent.activeProject, await realpath(project));
     assert.equal((await call("one", "fixture.activate_project", { project: other })).result.structuredContent.error.code, "PROJECT_BINDING_MANAGED");
   } finally {
-    client.close();
+    await client.close();
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -449,7 +456,7 @@ test("tracks one background process, detects loopback URLs, and stops it", async
     const stopped = await client.request("tools/call", { name: "dev.stop", arguments: {} });
     assert.equal(stopped.result.structuredContent.data.state, "exited");
   } finally {
-    client.close();
+    await client.close();
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -477,7 +484,7 @@ test("paginates, filters, namespaces, sanitizes, and forwards downstream tools",
     assert.equal(called.result.content[0].text, "echo=proxied");
     assert.deepEqual(called.result.structuredContent, { echoed: "proxied", activeProject: await realpath(project) });
   } finally {
-    client.close();
+    await client.close();
     await rm(home, { recursive: true, force: true });
   }
 });

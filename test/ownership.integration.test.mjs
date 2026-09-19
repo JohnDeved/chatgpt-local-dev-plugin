@@ -310,7 +310,8 @@ test("unconfirmed project-hook groups retain the candidate lease until cooperati
   const marker = join(source, "hook.started");
   const hookScript = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started");setTimeout(() => process.exit(0), 500)`;
   const hooks = [{ projectRoot: source, argv: [process.execPath, "-e", hookScript] }];
-  const runtime = new CoreRuntime([join(home, "projects")], hooks, [], undefined, new ProjectLeases(registry), processes);
+  const leases = new ProjectLeases(registry);
+  const runtime = new CoreRuntime([join(home, "projects")], hooks, [], undefined, leases, processes);
   const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
   t.after(async () => {
     terminationConfirmed = true;
@@ -327,7 +328,14 @@ test("unconfirmed project-hook groups retain the candidate lease until cooperati
   const opened = await opening;
   assert.equal(opened.structuredContent.error.code, "PROJECT_HOOK_FAILED");
   assert.equal((await successor.openProject(source, "error", undefined, "successor", { mode: "write" })).structuredContent.error.code, "PROJECT_IN_USE");
+  const originalRelease = leases.release.bind(leases);
+  let failCleanup = true;
+  leases.release = async (...args) => {
+    if (failCleanup) { failCleanup = false; throw new Error("TEST_PIN_RELEASE_FAILURE"); }
+    return await originalRelease(...args);
+  };
   terminationConfirmed = true;
+  await assert.rejects(runtime.close(), { message: "TEST_PIN_RELEASE_FAILURE" });
   await runtime.close();
   assert.equal((await successor.openProject(source, "error", undefined, "successor", { mode: "write" })).structuredContent.ok, true);
 });

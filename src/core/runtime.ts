@@ -301,6 +301,7 @@ export class CoreRuntime {
     operation: string;
     phase: "operation" | "background" | "idle";
     releaseAfterExit: boolean;
+    confirmed: boolean;
   }>();
   private backgroundQueue: Promise<void> = Promise.resolve();
   private backgroundSequence = 0;
@@ -570,7 +571,7 @@ export class CoreRuntime {
   ): Promise<boolean> {
     const snapshot = errorSnapshot(error);
     if (!(error instanceof Error) || error.message !== "COMMAND_STOP_UNCONFIRMED" || snapshot?.pid === null || snapshot?.pid === undefined || this.leases === undefined) return false;
-    const pin = { session, generation, operation, phase: "operation" as "operation" | "background" | "idle", releaseAfterExit };
+    const pin = { session, generation, operation, phase: "operation" as "operation" | "background" | "idle", releaseAfterExit, confirmed: false };
     this.foregroundPins.set(snapshot.pid, pin);
     await this.leases.complete(session, generation, operation, [snapshot.pid]).then(() => {
       pin.phase = "background";
@@ -616,16 +617,19 @@ export class CoreRuntime {
     for (const foreground of snapshots) {
       if (foreground.state === "running" || foreground.pid === null) continue;
       const pin = this.foregroundPins.get(foreground.pid);
-      if (pin === undefined) continue;
+      if (pin !== undefined) pin.confirmed = true;
+    }
+    for (const [pid, pin] of this.foregroundPins) {
+      if (!pin.confirmed) continue;
       if (pin.phase === "background") {
-        await this.leases.backgroundExited(pin.session, pin.generation, pin.operation, foreground.pid);
+        await this.leases.backgroundExited(pin.session, pin.generation, pin.operation, pid);
         pin.phase = "idle";
       } else if (pin.phase === "operation") {
         await this.leases.complete(pin.session, pin.generation, pin.operation);
         pin.phase = "idle";
       }
       if (pin.releaseAfterExit) await this.leases.release(pin.session, pin.generation);
-      this.foregroundPins.delete(foreground.pid);
+      this.foregroundPins.delete(pid);
     }
   }
 
@@ -863,6 +867,7 @@ export class CoreRuntime {
           operation: retainedOperation,
           phase: "operation" as "operation" | "background" | "idle",
           releaseAfterExit: false,
+          confirmed: false,
         };
         this.foregroundPins.set(pid, pin);
         await this.leases.complete(session, pin.generation, retainedOperation, [pid]).then(() => {
