@@ -119,12 +119,15 @@ export async function runServer(): Promise<void> {
           },
         };
         await progress.report(toolInvokingStatus(entry.tool), 0);
-        const result = await entry.call(params.arguments ?? {}, {
+        const call = async () => await entry.call(params.arguments ?? {}, {
           ...(metadata === undefined ? {} : { meta: metadata }), runOwner: owner, signal, progress,
         });
+        const result = runtime.isProjectBoundTool(params.name)
+          ? await runtime.callProjectBoundTool(owner, params.name, entry.tool.annotations?.readOnlyHint !== true, call)
+          : await call();
         const failed = result.isError === true || result.structuredContent?.ok === false;
         await progress.report(failed ? `${entry.tool.title ?? entry.tool.name} failed` : toolInvokedStatus(entry.tool), 1);
-        return activity.runs.attach(run.id, result);
+        return activity.runs.attach(run.id, result as never);
       }, extra.signal, { request: metadata, project: runtime.currentProject(owner).structuredContent.data }, run.id);
     } catch (error) {
       const code = error instanceof Error && /^[A-Z_]+$/u.test(error.message) ? error.message : "LOCAL_OPERATION_FAILED";

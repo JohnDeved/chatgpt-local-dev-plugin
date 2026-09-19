@@ -143,21 +143,59 @@ test("expired idle owner is fenced and force-release cannot evict a live generat
   const writer = await b.call("successor", "project.open", { query: f.source, mode: "write" }); assert.equal(writer.ok, true);
   assert.equal((await a.call("idle", "project.read", { path: "receipt.txt" })).error.code, "PROJECT_BINDING_REVOKED");
   assert.equal((await b.call("successor", "project.forceRelease", { path: f.source, generation: lease.data.generation, reason: "stale generation must not affect successor" })).error.code, "LEASE_GENERATION_MISMATCH");
+  assert.equal((await b.call("successor", "project.release", { generation: writer.data.generation })).ok, true);
+  const reopened = await a.call("idle", "project.open", { query: f.source, mode: "read" });
+  assert.equal(reopened.ok, true, JSON.stringify(reopened));
+  assert.notEqual(reopened.data.generation, lease.data.generation);
 });
 
-test("background work pins its generation until observed process exit", { timeout: 30000 }, async t => {
+test("background work pins its generation and retained snapshot to one session", { timeout: 30000 }, async t => {
   const f = await environment(t), a = await f.client("worker");
   await a.ready("worker");
+  await a.ready("peer");
   const lease = await a.call("worker", "project.open", { query: f.source, mode: "write" });
   assert.equal(lease.ok, true);
-  const started = await a.call("worker", "dev.run", {
+  const starting = a.call("worker", "dev.run", {
     argv: [process.execPath, "-e", "setTimeout(() => process.exit(0), 1000)"],
     background: true,
   });
-  assert.equal(started.ok, true);
+  assert.equal((await a.call("peer", "dev.stop")).error.code, "BACKGROUND_NOT_OWNED");
+  assert.equal((await starting).ok, true);
   assert.equal((await a.call("worker", "project.release", { generation: lease.data.generation })).error.code, "PROJECT_HAS_ACTIVE_WORK");
+  await delay(1200);
+  assert.equal((await a.call("peer", "dev.poll")).error.code, "BACKGROUND_NOT_OWNED");
   assert.equal((await a.call("worker", "dev.poll", { waitMs: 5000 })).data.state, "exited");
   assert.equal((await a.call("worker", "project.release", { generation: lease.data.generation })).ok, true);
+});
+
+test("same-path reopen revalidates explicit lease constraints", { timeout: 30000 }, async t => {
+  const f = await environment(t), a = await f.client("worker");
+  await a.ready("worker");
+  const first = await a.call("worker", "project.open", { query: f.source, mode: "write" });
+  assert.equal(first.ok, true);
+  const renewed = await a.call("worker", "project.open", { query: f.source, mode: "write", leaseMs: 1000 });
+  assert.equal(renewed.ok, true, JSON.stringify(renewed));
+  assert.notEqual(renewed.data.generation, first.data.generation);
+  assert.equal((await a.call("worker", "project.open", {
+    query: f.source,
+    mode: "write",
+    expectedHead: "0000000000000000000000000000000000000000",
+  })).error.code, "PROJECT_HEAD_MISMATCH");
+  assert.equal((await a.call("worker", "project.current")).data.generation, renewed.data.generation);
+});
+
+test("cooperative shutdown clears a confirmed-stopped background lease", { timeout: 30000 }, async t => {
+  const f = await environment(t), a = await f.client("worker"), b = await f.client("successor");
+  await a.ready("worker");
+  await b.ready("successor");
+  assert.equal((await a.call("worker", "project.open", { query: f.source, mode: "write" })).ok, true);
+  assert.equal((await a.call("worker", "dev.run", {
+    argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+    background: true,
+  })).ok, true);
+  await a.close();
+  const acquired = await b.call("successor", "project.open", { query: f.source, mode: "write" });
+  assert.equal(acquired.ok, true, JSON.stringify(acquired));
 });
 
 test("failed project setup preserves the previous authenticated binding", { timeout: 30000 }, async t => {

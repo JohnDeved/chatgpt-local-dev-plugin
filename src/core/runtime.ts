@@ -284,7 +284,10 @@ export class CoreRuntime {
   private readonly activeProjects = new Map<string, ActiveProject>();
   private readonly processes = new ProcessManager();
   private readonly temporaryProjects = new Set<string>();
+  private backgroundOwner: string | undefined;
   private backgroundPin: { session: string; generation: string; operation: string; pid: number } | undefined;
+  private backgroundCleanup: Promise<void> | undefined;
+  private downstreamQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly roots: string[],
@@ -293,6 +296,51 @@ export class CoreRuntime {
     private readonly invokeBinding?: ProjectBindingInvoker,
     private readonly leases?: ProjectLeases,
   ) {}
+
+  private async serializeDownstream<T>(action: () => Promise<T>): Promise<T> {
+    const previous = this.downstreamQueue;
+    let release: () => void = () => undefined;
+    this.downstreamQueue = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await action(); }
+    finally { release(); }
+  }
+
+  private bindingsForTool(tool: string): ProjectBinding[] {
+    return this.projectBindings.filter((binding) => tool.startsWith(`${binding.server}.`));
+  }
+
+  isProjectBoundTool(tool: string): boolean {
+    return this.bindingsForTool(tool).length > 0;
+  }
+
+  async callProjectBoundTool(
+    session: string,
+    tool: string,
+    write: boolean,
+    action: () => Promise<McpCallToolResult>,
+  ): Promise<McpCallToolResult | ToolCallResult> {
+    const project = this.activeProjects.get(session);
+    if (project === undefined) return failure(tool, "NO_ACTIVE_PROJECT", "Resolve a project before using this tool.");
+    const bindings = this.bindingsForTool(tool);
+    if (bindings.some((binding) => `${binding.server}.${binding.tool}` === tool)) {
+      return failure(tool, "PROJECT_BINDING_MANAGED", "Configured project binding tools are managed by Local Dev.");
+    }
+    try {
+      return await this.withOperation(session, project, write, async () => await this.serializeDownstream(async () => {
+        const results = await projectBindingResults(project.path, bindings, this.invokeBinding);
+        if (results.some((result) => typeof result === "object" && result !== null && !Array.isArray(result) && result.status === "error")) {
+          return failure(tool, "PROJECT_BINDING_FAILED", "The downstream server could not be bound to the authenticated project.");
+        }
+        return await action();
+      }));
+    } catch (error) {
+      if (error instanceof LeaseError && error.code === "PROJECT_BINDING_REVOKED" && this.activeProjects.get(session)?.generation === project.generation) {
+        this.activeProjects.delete(session);
+      }
+      return leaseFailure(tool, error);
+    }
+  }
 
   async openProject(
     query: string,
@@ -310,7 +358,7 @@ export class CoreRuntime {
     if (resolved.error !== undefined) return resolved.error;
     let project: ActiveProject = { ...resolved.target, mode: options.mode };
     await progress?.report(`Resolved ${basename(project.path)}; checking project setup…`, 0.25);
-    const previous = this.activeProjects.get(session);
+    let previous = this.activeProjects.get(session);
     let previousRelease: JsonValue = null;
     let bindings: JsonValue[] = [];
     let warnings = 0;
@@ -319,8 +367,17 @@ export class CoreRuntime {
     let candidateCommitted = false;
     try {
       if (this.leases !== undefined) {
-        if (previous?.path === project.path && previous.mode === options.mode && previous.generation !== undefined) {
-          await this.withOperation(session, previous, false, async () => undefined);
+        if (previous?.generation !== undefined) {
+          try {
+            await this.withOperation(session, previous, false, async () => undefined);
+          } catch (error) {
+            if (!(error instanceof LeaseError) || error.code !== "PROJECT_BINDING_REVOKED") throw error;
+            if (this.activeProjects.get(session)?.generation === previous.generation) this.activeProjects.delete(session);
+            previous = undefined;
+          }
+        }
+        const constrained = options.leaseMs !== undefined || options.expectedHead !== undefined || options.handoffId !== undefined;
+        if (previous?.path === project.path && previous.mode === options.mode && previous.generation !== undefined && !constrained) {
           return success("project.open", {
             path: previous.path, kind: previous.kind, mode: previous.mode, generation: previous.generation,
             hooksRun: 0, bindings: [], bindingWarnings: 0, previousRelease: null,
@@ -354,7 +411,7 @@ export class CoreRuntime {
           const hookFailure = await runProjectHooks(project, hooks, this.processes, progress);
           if (hookFailure !== undefined) return { hookFailure, bindings: [] as JsonValue[] };
           if (this.projectBindings.length === 0) await progress?.report("No downstream project bindings; activating project…", 0.75);
-          return { bindings: await projectBindingResults(project.path, this.projectBindings, this.invokeBinding, progress) };
+          return { bindings: await this.serializeDownstream(async () => await projectBindingResults(project.path, this.projectBindings, this.invokeBinding, progress)) };
         });
         if (setup.hookFailure !== undefined) {
           await this.leases.release(session, committed.lease.generation);
@@ -380,7 +437,7 @@ export class CoreRuntime {
         const hookFailure = await runProjectHooks(project, hooks, this.processes, progress);
         if (hookFailure !== undefined) return hookFailure;
         if (this.projectBindings.length === 0) await progress?.report("No downstream project bindings; activating project…", 0.75);
-        bindings = await projectBindingResults(project.path, this.projectBindings, this.invokeBinding, progress);
+        bindings = await this.serializeDownstream(async () => await projectBindingResults(project.path, this.projectBindings, this.invokeBinding, progress));
         warnings = bindings.filter((binding) =>
           typeof binding === "object" && binding !== null && !Array.isArray(binding) && binding.status === "error").length;
       }
@@ -430,12 +487,35 @@ export class CoreRuntime {
   private async clearBackgroundPin(snapshot: ProcessSnapshot): Promise<void> {
     const pin = this.backgroundPin;
     if (pin === undefined || snapshot.state === "running" || snapshot.pid !== pin.pid || this.leases === undefined) return;
+    if (this.backgroundCleanup !== undefined) return await this.backgroundCleanup;
+    const cleanup = this.leases.backgroundExited(pin.session, pin.generation, pin.operation, pin.pid);
+    this.backgroundCleanup = cleanup;
     try {
-      await this.leases.backgroundExited(pin.session, pin.generation, pin.operation, pin.pid);
-      this.backgroundPin = undefined;
-    } catch {
-      // Keep the pin so a later poll or stop can retry durable cleanup.
+      await cleanup;
+      if (this.backgroundPin === pin) this.backgroundPin = undefined;
+    } finally {
+      if (this.backgroundCleanup === cleanup) this.backgroundCleanup = undefined;
     }
+  }
+
+  private async claimBackground(session: string): Promise<ToolCallResult | undefined> {
+    const snapshot = this.processes.poll();
+    if (snapshot.state === "running") {
+      return failure("dev.run", this.backgroundOwner === session ? "BACKGROUND_BUSY" : "BACKGROUND_NOT_OWNED", this.backgroundOwner === session
+        ? "Only one background process may run at a time."
+        : "The tracked background process belongs to another authenticated session.");
+    }
+    if (snapshot.state === "exited") {
+      try { await this.clearBackgroundPin(snapshot); }
+      catch (error) { return leaseFailure("dev.run", error); }
+      if (this.backgroundPin !== undefined) return failure("dev.run", "BACKGROUND_CLEANUP_PENDING", "The previous background operation has not completed durable cleanup.");
+      this.processes.discardBackground(snapshot.pid);
+      this.backgroundOwner = undefined;
+    } else if (this.backgroundOwner !== undefined) {
+      return failure("dev.run", "BACKGROUND_BUSY", "A background start is already in progress.");
+    }
+    this.backgroundOwner = session;
+    return undefined;
   }
 
   async guarded(
@@ -447,7 +527,12 @@ export class CoreRuntime {
     const project = this.activeProjects.get(session);
     if (project === undefined) return failure(tool, "NO_ACTIVE_PROJECT", "Resolve a project before using this tool.");
     try { return await this.withOperation(session, project, write, action); }
-    catch (error) { return leaseFailure(tool, error); }
+    catch (error) {
+      if (error instanceof LeaseError && error.code === "PROJECT_BINDING_REVOKED" && this.activeProjects.get(session)?.generation === project.generation) {
+        this.activeProjects.delete(session);
+      }
+      return leaseFailure(tool, error);
+    }
   }
 
   async readProject(path: string, session = "runtime"): Promise<ToolCallResult> {
@@ -529,26 +614,32 @@ export class CoreRuntime {
   ): Promise<ToolCallResult> {
     const activeProject = this.activeProjects.get(session);
     if (activeProject === undefined) return failure("dev.run", "NO_ACTIVE_PROJECT", "Resolve a project before running a command.");
+    let backgroundClaimed = false;
+    if (background) {
+      const blocked = await this.claimBackground(session);
+      if (blocked !== undefined) return blocked;
+      backgroundClaimed = true;
+    }
     const label = commandLabel(argv);
     await progress?.report(background ? `Starting ${label} in the background…` : `Running ${label}…`, 0.1);
     const stopHeartbeat = background ? () => undefined : commandHeartbeat(progress, label);
     let operation: string | undefined;
-    let backgroundStarted = false;
+    let backgroundRetained = false;
     try {
       if (this.leases !== undefined && activeProject.generation !== undefined) {
         operation = await this.leases.access(session, activeProject.generation, true);
       }
       const resolvedCwd = await commandCwd(activeProject.path, cwd);
       const result = await this.processes.run(argv, resolvedCwd, background, timeoutMs);
-      backgroundStarted = background;
       if (background && operation !== undefined && this.leases !== undefined && activeProject.generation !== undefined) {
         if (result.pid === null) throw new LeaseError("INVALID_BACKGROUND_IDENTITY");
         await this.leases.complete(session, activeProject.generation, operation, [result.pid]);
         this.backgroundPin = { session, generation: activeProject.generation, operation, pid: result.pid };
         operation = undefined;
         const exited = this.processes.backgroundExit();
-        if (exited !== undefined) void exited.then((snapshot) => this.clearBackgroundPin(snapshot));
+        if (exited !== undefined) void exited.then((snapshot) => this.clearBackgroundPin(snapshot)).catch(() => undefined);
       }
+      if (background) backgroundRetained = true;
       if (!background && result.exitCode !== 0 && !allowNonZero) {
         await progress?.report(`${label} exited with status ${result.exitCode}`, 0.9);
         return failure("dev.run", "COMMAND_EXIT_NONZERO", `Command exited with status ${result.exitCode}.`, processData(result));
@@ -559,7 +650,6 @@ export class CoreRuntime {
       );
       return success("dev.run", processData(result), background ? `started pid=${result.pid}` : `exit=${result.exitCode}`);
     } catch (error) {
-      if (backgroundStarted) await this.processes.stop().catch(() => undefined);
       if (error instanceof LeaseError) return leaseFailure("dev.run", error);
       const code = error instanceof Error ? error.message : "COMMAND_FAILED";
       const snapshot = errorSnapshot(error);
@@ -583,8 +673,15 @@ export class CoreRuntime {
       await progress?.report(`${label} could not be started`, 0.9);
       return failure("dev.run", "COMMAND_FAILED", "Command could not be started.");
     } finally {
+      const abandoned = backgroundClaimed && !backgroundRetained
+        ? await this.processes.stop().catch(() => this.processes.poll())
+        : undefined;
       if (operation !== undefined && this.leases !== undefined && activeProject.generation !== undefined) {
         await this.leases.complete(session, activeProject.generation, operation).catch(() => undefined);
+      }
+      if (abandoned !== undefined && abandoned.state !== "running") {
+        this.processes.discardBackground(abandoned.pid);
+        this.backgroundOwner = undefined;
       }
       stopHeartbeat();
     }
@@ -645,21 +742,27 @@ export class CoreRuntime {
   }
 
   async poll(waitMs = 0, session = "runtime"): Promise<ToolCallResult> {
-    if (this.backgroundPin !== undefined && this.backgroundPin.session !== session) {
+    if (this.backgroundOwner !== undefined && this.backgroundOwner !== session) {
       return failure("dev.poll", "BACKGROUND_NOT_OWNED", "The tracked background process belongs to another authenticated session.");
     }
     const result = waitMs > 0 ? await this.processes.wait(waitMs) : this.processes.poll();
-    await this.clearBackgroundPin(result);
+    try { await this.clearBackgroundPin(result); }
+    catch (error) { return leaseFailure("dev.poll", error); }
     return success("dev.poll", processData(result), `state=${result.state}`);
   }
 
   async stop(progress?: ToolProgress, session = "runtime"): Promise<ToolCallResult> {
-    if (this.backgroundPin !== undefined && this.backgroundPin.session !== session) {
+    if (this.backgroundOwner !== undefined && this.backgroundOwner !== session) {
       return failure("dev.stop", "BACKGROUND_NOT_OWNED", "The tracked background process belongs to another authenticated session.");
     }
     await progress?.report("Sending the background process a stop signal…", 0.25);
     const result = await this.processes.stop();
-    await this.clearBackgroundPin(result);
+    try { await this.clearBackgroundPin(result); }
+    catch (error) { return leaseFailure("dev.stop", error); }
+    if (result.state !== "running") {
+      this.processes.discardBackground(result.pid);
+      this.backgroundOwner = undefined;
+    }
     await progress?.report(`Background process is ${result.state}`, 0.9);
     return success("dev.stop", processData(result), `state=${result.state}`);
   }
@@ -682,8 +785,12 @@ export class CoreRuntime {
   }
 
   async close(): Promise<void> {
-    await this.processes.close();
-    await this.clearBackgroundPin(this.processes.poll());
+    const background = await this.processes.close();
+    await this.clearBackgroundPin(background);
+    if (background.state !== "running") {
+      this.processes.discardBackground(background.pid);
+      this.backgroundOwner = undefined;
+    }
     if (this.leases !== undefined) {
       await Promise.allSettled([...this.activeProjects].map(async ([session, project]) => {
         if (project.generation !== undefined) await this.leases?.release(session, project.generation);

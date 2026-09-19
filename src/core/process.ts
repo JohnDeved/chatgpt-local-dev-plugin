@@ -110,7 +110,7 @@ export class ProcessManager {
     const signal = currentActivity()?.signal;
     signal?.throwIfAborted();
     if (background) {
-      if (this.hasRunningBackground()) throw new Error("BACKGROUND_BUSY");
+      if (this.background !== undefined) throw new Error("BACKGROUND_BUSY");
       this.background = start(argv, cwd, true);
       if (!(await this.background.started)) {
         await this.background.exited;
@@ -181,14 +181,19 @@ export class ProcessManager {
   async stop(): Promise<ProcessSnapshot> {
     const tracked = this.background;
     if (tracked === undefined) return snapshot(undefined);
-    const confirmed = await terminateCommand(tracked.child);
-    const result = snapshot(tracked);
-    if (confirmed) this.background = undefined;
-    return result;
+    await terminateCommand(tracked.child);
+    return snapshot(tracked);
   }
 
-  async close(): Promise<void> {
+  discardBackground(pid: number | null): boolean {
+    const current = snapshot(this.background);
+    if (current.state === "running" || current.pid !== pid) return false;
+    this.background = undefined;
+    return true;
+  }
+
+  async close(): Promise<ProcessSnapshot> {
     await Promise.allSettled([...this.foreground].map((tracked) => terminateCommand(tracked.child)));
-    await this.stop();
+    return await this.stop();
   }
 }
