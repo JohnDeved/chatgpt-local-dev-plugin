@@ -86,6 +86,10 @@ function validMissingAction(value: unknown): value is MissingProjectAction {
   return value === "error" || value === "create" || value === "temporary";
 }
 
+function validUuid(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+}
+
 export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
   return [
     {
@@ -108,6 +112,20 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
               enum: ["error", "create", "temporary"],
               default: "error",
             },
+            mode: {
+              type: "string",
+              description: "Acquire a shared read-only lease or an exclusive writer lease.",
+              enum: ["read", "write"],
+              default: "write",
+            },
+            leaseMs: {
+              type: "integer",
+              description: "Idle lease lifetime before safe reconciliation.",
+              minimum: 1000,
+              maximum: 3_600_000,
+            },
+            expectedHead: { type: "string", pattern: "^[a-f0-9]{40,64}$" },
+            handoffId: { type: "string", format: "uuid" },
           },
           required: ["query"],
           additionalProperties: false,
@@ -118,8 +136,17 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
       call: async (input, context) => {
         if (typeof input.query !== "string" || input.query.length === 0 || input.query.length > 1024) return invalid("project.open");
         if (input.onMissing !== undefined && !validMissingAction(input.onMissing)) return invalid("project.open");
-        if (Object.keys(input).some((key) => !["query", "onMissing"].includes(key))) return invalid("project.open");
-        return result(await runtime.openProject(input.query, input.onMissing ?? "error", context?.progress));
+        if (input.mode !== undefined && input.mode !== "read" && input.mode !== "write") return invalid("project.open");
+        if (input.leaseMs !== undefined && (typeof input.leaseMs !== "number" || !Number.isInteger(input.leaseMs) || input.leaseMs < 1000 || input.leaseMs > 3_600_000)) return invalid("project.open");
+        if (input.expectedHead !== undefined && (typeof input.expectedHead !== "string" || !/^[a-f0-9]{40,64}$/u.test(input.expectedHead))) return invalid("project.open");
+        if (input.handoffId !== undefined && !validUuid(input.handoffId)) return invalid("project.open");
+        if (Object.keys(input).some((key) => !["query", "onMissing", "mode", "leaseMs", "expectedHead", "handoffId"].includes(key))) return invalid("project.open");
+        return result(await runtime.openProject(input.query, input.onMissing ?? "error", context?.progress, context?.runOwner ?? "runtime", {
+          mode: input.mode === "read" ? "read" : "write",
+          ...(input.leaseMs === undefined ? {} : { leaseMs: input.leaseMs as number }),
+          ...(input.expectedHead === undefined ? {} : { expectedHead: input.expectedHead as string }),
+          ...(input.handoffId === undefined ? {} : { handoffId: input.handoffId as string }),
+        }));
       },
     },
     {
@@ -131,7 +158,100 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         outputSchema: envelope,
         annotations: annotations(true, false, true),
       }, "Checking current project…", "Current project checked"),
-      call: (input) => Object.keys(input).length === 0 ? result(runtime.currentProject()) : invalid("project.current"),
+      call: (input, context) => Object.keys(input).length === 0 ? result(runtime.currentProject(context?.runOwner ?? "runtime")) : invalid("project.current"),
+    },
+    {
+      tool: withToolStatus({
+        name: "project.read",
+        title: "Read project file",
+        description: "Read one bounded UTF-8 file inside the authenticated active project.",
+        inputSchema: {
+          type: "object",
+          properties: { path: { type: "string", minLength: 1, maxLength: 1024 } },
+          required: ["path"],
+          additionalProperties: false,
+        },
+        outputSchema: envelope,
+        annotations: annotations(true, false, true),
+      }, "Reading project file…", "Project file read"),
+      call: async (input, context) => typeof input.path === "string" && input.path.length > 0 && input.path.length <= 1024 && Object.keys(input).length === 1
+        ? result(await runtime.readProject(input.path, context?.runOwner ?? "runtime"))
+        : invalid("project.read"),
+    },
+    {
+      tool: withToolStatus({
+        name: "project.files",
+        title: "List project files",
+        description: "List one bounded directory inside the authenticated active project.",
+        inputSchema: {
+          type: "object",
+          properties: { path: { type: "string", minLength: 1, maxLength: 1024, default: "." } },
+          additionalProperties: false,
+        },
+        outputSchema: envelope,
+        annotations: annotations(true, false, true),
+      }, "Listing project files…", "Project files listed"),
+      call: async (input, context) => (input.path === undefined || (typeof input.path === "string" && input.path.length > 0 && input.path.length <= 1024)) && Object.keys(input).every((key) => key === "path")
+        ? result(await runtime.listProject(input.path as string | undefined, context?.runOwner ?? "runtime"))
+        : invalid("project.files"),
+    },
+    {
+      tool: withToolStatus({
+        name: "project.release",
+        title: "Release project",
+        description: "Relinquish the authenticated session's exact idle lease generation and return a handoff ticket.",
+        inputSchema: {
+          type: "object",
+          properties: { generation: { type: "string", format: "uuid" } },
+          required: ["generation"],
+          additionalProperties: false,
+        },
+        outputSchema: envelope,
+        annotations: annotations(false, true, false),
+      }, "Releasing project lease…", "Project lease relinquished"),
+      call: async (input, context) => validUuid(input.generation) && Object.keys(input).length === 1
+        ? result(await runtime.releaseProject(input.generation, context?.runOwner ?? "runtime"))
+        : invalid("project.release"),
+    },
+    {
+      tool: withToolStatus({
+        name: "project.forceRelease",
+        title: "Force release stale project",
+        description: "Cooperatively reclaim one exact stale lease generation. Active work is never evicted and every request is audited.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string", minLength: 1, maxLength: 1024 },
+            generation: { type: "string", format: "uuid" },
+            reason: { type: "string", minLength: 1, maxLength: 1000 },
+          },
+          required: ["path", "generation", "reason"],
+          additionalProperties: false,
+        },
+        outputSchema: envelope,
+        annotations: annotations(false, true, false),
+      }, "Checking stale project lease…", "Stale project lease reclaimed"),
+      call: async (input, context) => typeof input.path === "string" && input.path.length > 0 && input.path.length <= 1024 && validUuid(input.generation) && typeof input.reason === "string" && input.reason.trim().length > 0 && input.reason.length <= 1000 && Object.keys(input).length === 3
+        ? result(await runtime.forceReleaseProject(input.path, input.generation, input.reason, context?.runOwner ?? "runtime"))
+        : invalid("project.forceRelease"),
+    },
+    {
+      tool: withToolStatus({
+        name: "project.handoff",
+        title: "Verify project handoff",
+        description: "Verify that a relinquished project was acquired by an independent runtime.",
+        inputSchema: {
+          type: "object",
+          properties: { id: { type: "string", format: "uuid" } },
+          required: ["id"],
+          additionalProperties: false,
+        },
+        outputSchema: envelope,
+        annotations: annotations(true, false, true),
+      }, "Checking project handoff…", "Project handoff checked"),
+      call: async (input) => validUuid(input.id) && Object.keys(input).length === 1
+        ? result(await runtime.handoffProject(input.id))
+        : invalid("project.handoff"),
     },
     {
       tool: withToolStatus({
@@ -165,6 +285,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
           input.cwd as string | undefined,
           input.allowNonZero === true,
           context?.progress,
+          context?.runOwner ?? "runtime",
         ));
       },
     },
@@ -206,7 +327,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         if (Object.keys(input).some((key) => !["steps", "stopOnError"].includes(key))) return invalid("dev.batch");
         const steps = input.steps.map(batchStep);
         if (steps.some((step) => step === undefined)) return invalid("dev.batch");
-        return result(await runtime.batch(steps as BatchStep[], input.stopOnError !== false, context?.progress));
+        return result(await runtime.batch(steps as BatchStep[], input.stopOnError !== false, context?.progress, context?.runOwner ?? "runtime"));
       },
     },
     {
@@ -230,11 +351,11 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         outputSchema: envelope,
         annotations: annotations(true, false, true),
       }, "Checking background process…", "Background process checked"),
-      call: async (input) => {
+      call: async (input, context) => {
         if (Object.keys(input).some((key) => key !== "waitMs")) return invalid("dev.poll");
         const waitMs = input.waitMs;
         if (waitMs !== undefined && (typeof waitMs !== "number" || !Number.isInteger(waitMs) || waitMs < 0 || waitMs > 120_000)) return invalid("dev.poll");
-        return result(await runtime.poll(waitMs));
+        return result(await runtime.poll(waitMs, context?.runOwner ?? "runtime"));
       },
     },
     {
@@ -247,7 +368,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         annotations: annotations(false, true, true),
       }, "Stopping background process…", "Background process stopped"),
       call: async (input, context) => Object.keys(input).length === 0
-        ? result(await runtime.stop(context?.progress))
+        ? result(await runtime.stop(context?.progress, context?.runOwner ?? "runtime"))
         : invalid("dev.stop"),
     },
     {
@@ -260,7 +381,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         annotations: annotations(true, false, true),
       }, "Reading project changes…", "Project changes ready"),
       call: async (input, context) => Object.keys(input).length === 0
-        ? result(await runtime.diff(context?.progress))
+        ? result(await runtime.diff(context?.progress, context?.runOwner ?? "runtime"))
         : invalid("dev.diff"),
     },
   ];

@@ -63,8 +63,11 @@ server.setRequestHandler(ReadResourceRequestSchema, ({ params }) => {
   };
 });
 
+let activeProject = null;
+
 server.setRequestHandler(CallToolRequestSchema, ({ params }) => {
   if (params.name === "activate_project") {
+    activeProject = String(params.arguments?.project);
     return {
       content: [{ type: "text", text: `active=${String(params.arguments?.project)}` }],
       structuredContent: { activeProject: params.arguments?.project },
@@ -72,7 +75,7 @@ server.setRequestHandler(CallToolRequestSchema, ({ params }) => {
   }
   return {
     content: [{ type: "text", text: `echo=${String(params.arguments?.value)}` }],
-    structuredContent: { echoed: params.arguments?.value },
+    structuredContent: { echoed: params.arguments?.value, activeProject },
   };
 });
 

@@ -35,8 +35,10 @@ export async function terminateCommand(child: SpawnedCommand): Promise<boolean> 
   const life = lifecycles.get(child);
   if (life === undefined) throw new Error("UNOWNED_PROCESS");
   if (life.stop !== undefined) return life.stop;
-  life.stop = (async () => {
-    signalOwned(child, "SIGTERM");
+  const attempt = (async () => {
+    if (life.closed && !groupAlive(child)) return true;
+    try { signalOwned(child, "SIGTERM"); }
+    catch { return false; }
     const deadline = Date.now() + 1500;
     while (groupAlive(child) && Date.now() < deadline) await delay(50);
     if (groupAlive(child)) signalOwned(child, "SIGKILL");
@@ -45,7 +47,15 @@ export async function terminateCommand(child: SpawnedCommand): Promise<boolean> 
     while (groupAlive(child) && Date.now() < groupDeadline) await delay(50);
     return life.closed && !groupAlive(child);
   })();
-  return life.stop;
+  life.stop = attempt;
+  try {
+    const confirmed = await attempt;
+    if (!confirmed && life.stop === attempt) delete life.stop;
+    return confirmed;
+  } catch (error) {
+    if (life.stop === attempt) delete life.stop;
+    throw error;
+  }
 }
 
 export function spawnCommand(

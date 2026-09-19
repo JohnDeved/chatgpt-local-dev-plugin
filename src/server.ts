@@ -2,7 +2,8 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { delimiter, dirname } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
@@ -14,6 +15,7 @@ import { coreTools, CoreRuntime } from "./core/index.js";
 import { resolveElicitation } from "./elicitation.js";
 import { createToolProgress, type ToolProgress } from "./progress.js";
 import { ProxyManager } from "./proxy.js";
+import { ProjectLeases } from "./project-leases.js";
 import { failure } from "./result.js";
 import { RUN_TOOL_NAMES, runTools } from "./run-tools.js";
 import { runOwner } from "./runs.js";
@@ -49,6 +51,20 @@ const SERVER_INSTRUCTIONS = [
   "After all file-changing operations for a user request, run the repository check and call dev.diff at most once.",
 ].join(" ");
 
+export function retryableClose(action: () => Promise<void>): () => Promise<void> {
+  let active: Promise<void> | undefined;
+  return async () => {
+    if (active !== undefined) return await active;
+    const attempt = action();
+    active = attempt;
+    try { await attempt; }
+    catch (error) {
+      if (active === attempt) active = undefined;
+      throw error;
+    }
+  };
+}
+
 export async function runServer(): Promise<void> {
   const nodeBin = dirname(process.execPath);
   process.env.PATH = process.env.PATH ? `${nodeBin}${delimiter}${process.env.PATH}` : nodeBin;
@@ -81,6 +97,7 @@ export async function runServer(): Promise<void> {
       if (entry === undefined) return undefined;
       return await activity.execute(entry.tool, arguments_, async (signal) => await entry.call(arguments_, { signal }));
     },
+    new ProjectLeases(join(homedir(), ".local-dev", "project-leases")),
   );
   const registry = new ToolRegistry();
   registry.addAll(coreTools(runtime));
@@ -116,13 +133,16 @@ export async function runServer(): Promise<void> {
           },
         };
         await progress.report(toolInvokingStatus(entry.tool), 0);
-        const result = await entry.call(params.arguments ?? {}, {
-          ...(metadata === undefined ? {} : { meta: metadata }), signal, progress,
+        const call = async () => await entry.call(params.arguments ?? {}, {
+          ...(metadata === undefined ? {} : { meta: metadata }), runOwner: owner, signal, progress,
         });
+        const result = runtime.isProjectBoundTool(params.name)
+          ? await runtime.callProjectBoundTool(owner, params.name, entry.tool.annotations?.readOnlyHint !== true, call)
+          : await call();
         const failed = result.isError === true || result.structuredContent?.ok === false;
         await progress.report(failed ? `${entry.tool.title ?? entry.tool.name} failed` : toolInvokedStatus(entry.tool), 1);
-        return activity.runs.attach(run.id, result);
-      }, extra.signal, { request: metadata, project: runtime.currentProject().structuredContent.data }, run.id);
+        return activity.runs.attach(run.id, result as never);
+      }, extra.signal, { request: metadata, project: runtime.currentProject(owner).structuredContent.data }, run.id);
     } catch (error) {
       const code = error instanceof Error && /^[A-Z_]+$/u.test(error.message) ? error.message : "LOCAL_OPERATION_FAILED";
       await remoteProgress?.report(`${entry.tool.title ?? entry.tool.name}: ${code}`);
@@ -135,18 +155,18 @@ export async function runServer(): Promise<void> {
     }
   });
   const transport = new StdioServerTransport();
-  let closing = false;
-  const close = async (): Promise<void> => {
-    if (closing) return;
-    closing = true;
+  const close = retryableClose(async () => {
     await runtime.close();
     await proxy.close();
     await activity.close();
     await server.close();
-  };
-  process.on("SIGINT", () => void close());
-  process.on("SIGTERM", () => void close());
-  server.onclose = () => void close();
+  });
+  const requestClose = (): void => { void close().catch(() => undefined); };
+  // Stdio transport does not emit onclose on EOF; close our owned runtime cooperatively.
+  process.stdin.once("end", requestClose);
+  process.on("SIGINT", requestClose);
+  process.on("SIGTERM", requestClose);
+  server.onclose = requestClose;
   await server.connect(transport);
 }
 
