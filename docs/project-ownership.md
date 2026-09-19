@@ -29,7 +29,9 @@ normal OS cleanup after process exit, releases the mutex. No lock file is delete
 to reclaim ownership and force-release sends no process signals.
 
 State updates use a versioned, strictly validated record and an HMAC authenticated
-with an owner-private registry key. A lost key with existing state fails closed.
+with an owner-private registry key. Loss of initialized state fails closed; HMAC
+is not hardware rollback protection against the same OS user restoring a complete
+old signed snapshot. A lost key with existing state fails closed.
 Symlinked/nonprivate state files are rejected. This is a same-user cooperative
 integrity boundary, **not** a sandbox against arbitrary code running as that OS
 user. Nothing in this module changes Local Dev or platform approval policy.
@@ -41,15 +43,18 @@ mode, session and random generation. Callers must receive their session identity
 from the trusted transport dispatcher; future tool schemas must not accept an
 arbitrary owner/runtime ID or a caller-authored success Boolean.
 
-Read leases coexist. Any writer conflicts with another owner's reader or writer
-on the same or ancestor/descendant path. Symlinks canonicalize to the same scope.
-A provisional lease protects setup; previous ownership is only relinquished when
-new setup is committed. Abort leaves the old lease intact. Reads validate HEAD;
+Read leases coexist. Writers fence the canonical Git worktree root, so sibling
+package directories cannot own independent writers; separate worktrees remain
+independent. Non-Git scopes use ordinary canonical path overlap. Symlinks canonicalize to the same scope.
+A provisional lease protects selection; it cannot authorize reads/writes or mint
+release receipts. The previous generation and handoff ID are bound at reservation,
+and commit is single-use. Abort leaves old ownership intact. Side-effecting setup
+hooks require a separately authenticated committed operation; the blocked runtime
+integration must not execute them under a bare provisional lease. Reads validate HEAD;
 writers may intentionally change it but cannot silently change the directory inode.
 
-A live idle lease may expire. A confirmed dead runtime's idle leases can be
-reconciled without waiting for TTL. Active write operations, provisional writer
-setup and recorded background work are quarantined instead of being guessed dead.
+A live idle lease may expire. A confirmed dead runtime's idle leases, including an uncommitted reservation with
+no authorized work, can be reconciled without waiting for TTL. Active write operations and recorded background work are quarantined instead of being guessed dead.
 This is intentional: the provider does **not** claim that a dead parent proves
 its writer children are gone. Runtime integration must feed authenticated process
 lifecycle observations before that limitation can be closed.
@@ -57,13 +62,23 @@ lifecycle observations before that limitation can be closed.
 Scoped release requires the current runtime/session generation and no active work.
 It returns `relinquished: true, released: false` plus an expiring handoff ID. A new
 independent owner must atomically acquire the exact source identity using that
-handoff ID. Only then can `handoff()` return `released: true`; a source reacquisition
+handoff ID. The acquiring runtime must differ, not merely its session name. Only then can
+`handoff()` return `released: true`; a source reacquisition
 or HEAD/inode change invalidates it. A neutral path alone is never release proof.
 
 `forceRelease` checks canonical path, exact generation, a nonempty reason and actual
 reclaimability. It audits the request and outcome, refuses active work, and cannot
 release a later replacement generation. It does not terminate processes or delete
 registry lock files.
+
+Each access returns a unique operation ID; completion consumes it exactly once.
+Background records retain their originating operation/PID and cannot be cleared by
+another completion. The internal `backgroundExited` observer requires the exact
+pair; future runtime integration must call it only after independently confirming
+that owned child's exit, never expose it as a caller-supplied proof tool.
+
+Provider `close()` is terminal and waits for in-flight provider transactions before
+closing its kernel marker. Closed instances cannot create or continue ownership.
 
 ## Proven and unproven behavior
 
@@ -81,6 +96,22 @@ production acceptance tests exercise the actual stdio server separately and rema
 red until the blocked dispatcher work is safely completed. PR125/126/127 actual
 checkouts have not been opened by the new provider. Earlier Worker3 matrix and
 previous denied attempts remain history, not results of this implementation.
+
+## Review status and remaining candidate defect
+
+Independent review of the first candidate rejected six state-machine/integrity
+issues. The current source adds bound reservation arguments, single-use commit,
+unique operation tokens, per-operation background records, missing-state failure,
+Git-worktree writer fencing, dead-idle pending recovery and terminal close. Fourteen
+targeted provider tests pass, but this is not independent acceptance of the new head.
+
+A remaining pending-previous edge was identified during follow-up: `reserve` and
+`commit` still accept an uncommitted prior generation as `previous`, so switching
+can call the internal removal path for a provisional record. The source guard and
+regression edit for that edge were platform-safety-blocked before application.
+The denied edit was not retried or rerouted. Keep the candidate rejected/draft and
+**do not deploy** until this path is corrected and independently re-reviewed. A
+passing tested subset is not a license to suppress that known gap.
 
 ## Cooperative EOF repair
 

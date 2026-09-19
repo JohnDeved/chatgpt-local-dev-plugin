@@ -53,13 +53,13 @@ export class LeaseStorage<T> {
     }
     try {
       const keyPath = join(this.directory, "authority.key"), path = join(this.directory, "state.json");
-      let key: Buffer;
+      let key: Buffer, createdKey = false;
       try { key = await this.read(keyPath, 32); }
       catch (error) {
         if (errno(error) !== "ENOENT") throw error;
         try { await lstat(path); throw new LeaseError("REGISTRY_KEY_MISSING"); }
         catch (found) { if (errno(found) !== "ENOENT") throw found; }
-        key = randomBytes(32); await this.replace(keyPath, key);
+        key = randomBytes(32); await this.replace(keyPath, key); createdKey = true;
       }
       if (key.length !== 32) throw new LeaseError("REGISTRY_KEY_INVALID");
       let state: T;
@@ -69,7 +69,11 @@ export class LeaseStorage<T> {
         const expected = createHmac("sha256", key).update(record.payload).digest();
         if (!timingSafeEqual(expected, Buffer.from(record.signature, "hex"))) throw new LeaseError("REGISTRY_AUTHENTICATION_FAILED");
         state = this.decode(JSON.parse(record.payload));
-      } catch (error) { if (errno(error) !== "ENOENT") throw error; state = this.initial(); }
+      } catch (error) {
+        if (errno(error) !== "ENOENT") throw error;
+        if (!createdKey) throw new LeaseError("REGISTRY_STATE_MISSING");
+        state = this.initial();
+      }
       // Persist audited rejected transitions/reconciliation, then surface failure.
       let result: R | undefined, thrown: unknown, failed = false;
       try { result = await action(state); } catch (error) { failed = true; thrown = error; }
