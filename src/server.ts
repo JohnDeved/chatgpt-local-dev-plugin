@@ -51,6 +51,20 @@ const SERVER_INSTRUCTIONS = [
   "After all file-changing operations for a user request, run the repository check and call dev.diff at most once.",
 ].join(" ");
 
+export function retryableClose(action: () => Promise<void>): () => Promise<void> {
+  let active: Promise<void> | undefined;
+  return async () => {
+    if (active !== undefined) return await active;
+    const attempt = action();
+    active = attempt;
+    try { await attempt; }
+    catch (error) {
+      if (active === attempt) active = undefined;
+      throw error;
+    }
+  };
+}
+
 export async function runServer(): Promise<void> {
   const nodeBin = dirname(process.execPath);
   process.env.PATH = process.env.PATH ? `${nodeBin}${delimiter}${process.env.PATH}` : nodeBin;
@@ -141,20 +155,18 @@ export async function runServer(): Promise<void> {
     }
   });
   const transport = new StdioServerTransport();
-  let closing = false;
-  const close = async (): Promise<void> => {
-    if (closing) return;
-    closing = true;
+  const close = retryableClose(async () => {
     await runtime.close();
     await proxy.close();
     await activity.close();
     await server.close();
-  };
+  });
+  const requestClose = (): void => { void close().catch(() => undefined); };
   // Stdio transport does not emit onclose on EOF; close our owned runtime cooperatively.
-  process.stdin.once("end", () => void close());
-  process.on("SIGINT", () => void close());
-  process.on("SIGTERM", () => void close());
-  server.onclose = () => void close();
+  process.stdin.once("end", requestClose);
+  process.on("SIGINT", requestClose);
+  process.on("SIGTERM", requestClose);
+  server.onclose = requestClose;
   await server.connect(transport);
 }
 

@@ -213,6 +213,7 @@ async function runProjectHooks(
     } catch (error) {
       if (project.kind === "temporary") await rm(project.path, { recursive: true, force: true });
       const snapshot = errorSnapshot(error);
+      if (error instanceof Error && error.message === "COMMAND_STOP_UNCONFIRMED") throw error;
       return failure(
         "project.open",
         "PROJECT_HOOK_FAILED",
@@ -294,7 +295,13 @@ export class CoreRuntime {
   private backgroundOwnership: BackgroundOwnership | undefined;
   private backgroundPin: { session: string; generation: string; operation: string; pid: number } | undefined;
   private backgroundCleanup: Promise<void> | undefined;
-  private readonly foregroundPins = new Map<number, { session: string; generation: string; operation: string; background: boolean }>();
+  private readonly foregroundPins = new Map<number, {
+    session: string;
+    generation: string;
+    operation: string;
+    phase: "operation" | "background" | "idle";
+    releaseAfterExit: boolean;
+  }>();
   private backgroundQueue: Promise<void> = Promise.resolve();
   private backgroundSequence = 0;
   private closing = false;
@@ -480,7 +487,7 @@ export class CoreRuntime {
           if (hookFailure !== undefined) return { hookFailure, bindings: [] as JsonValue[] };
           if (this.projectBindings.length === 0) await progress?.report("No downstream project bindings; activating project…", 0.75);
           return { bindings: await this.serializeDownstream(async () => await projectBindingResults(project.path, this.projectBindings, this.invokeBinding, progress)) };
-        });
+        }, true);
         if (setup.hookFailure !== undefined) {
           await this.leases.release(session, committed.lease.generation);
           candidateGeneration = undefined;
@@ -518,6 +525,15 @@ export class CoreRuntime {
       if (project.kind === "temporary" && this.activeProjects.get(session)?.path !== project.path) {
         await rm(project.path, { recursive: true, force: true });
       }
+      if (error instanceof Error && error.message === "COMMAND_STOP_UNCONFIRMED") {
+        const snapshot = errorSnapshot(error);
+        return failure(
+          "project.open",
+          "PROJECT_HOOK_FAILED",
+          "A configured project-open hook left process-group cleanup unconfirmed.",
+          snapshot === undefined ? null : processData(snapshot),
+        );
+      }
       return leaseFailure("project.open", error);
     }
     candidateGeneration = undefined;
@@ -545,11 +561,40 @@ export class CoreRuntime {
     );
   }
 
-  private async withOperation<T>(session: string, project: ActiveProject, write: boolean, action: () => Promise<T>): Promise<T> {
+  private async retainForegroundOperation(
+    session: string,
+    generation: string,
+    operation: string,
+    error: unknown,
+    releaseAfterExit: boolean,
+  ): Promise<boolean> {
+    const snapshot = errorSnapshot(error);
+    if (!(error instanceof Error) || error.message !== "COMMAND_STOP_UNCONFIRMED" || snapshot?.pid === null || snapshot?.pid === undefined || this.leases === undefined) return false;
+    const pin = { session, generation, operation, phase: "operation" as "operation" | "background" | "idle", releaseAfterExit };
+    this.foregroundPins.set(snapshot.pid, pin);
+    await this.leases.complete(session, generation, operation, [snapshot.pid]).then(() => {
+      pin.phase = "background";
+    }).catch(() => undefined);
+    return true;
+  }
+
+  private async withOperation<T>(
+    session: string,
+    project: ActiveProject,
+    write: boolean,
+    action: () => Promise<T>,
+    releaseAfterUnconfirmed = false,
+  ): Promise<T> {
     if (this.leases === undefined || project.generation === undefined) return await action();
     const operation = await this.leases.access(session, project.generation, write);
+    let retained = false;
     try { return await action(); }
-    finally { await this.leases.complete(session, project.generation, operation); }
+    catch (error) {
+      retained = await this.retainForegroundOperation(session, project.generation, operation, error, releaseAfterUnconfirmed);
+      throw error;
+    } finally {
+      if (!retained) await this.leases.complete(session, project.generation, operation);
+    }
   }
 
   private async clearBackgroundPin(snapshot: ProcessSnapshot): Promise<void> {
@@ -563,6 +608,24 @@ export class CoreRuntime {
       if (this.backgroundPin === pin) this.backgroundPin = undefined;
     } finally {
       if (this.backgroundCleanup === cleanup) this.backgroundCleanup = undefined;
+    }
+  }
+
+  private async clearForegroundPins(snapshots: ProcessSnapshot[]): Promise<void> {
+    if (this.leases === undefined) return;
+    for (const foreground of snapshots) {
+      if (foreground.state === "running" || foreground.pid === null) continue;
+      const pin = this.foregroundPins.get(foreground.pid);
+      if (pin === undefined) continue;
+      if (pin.phase === "background") {
+        await this.leases.backgroundExited(pin.session, pin.generation, pin.operation, foreground.pid);
+        pin.phase = "idle";
+      } else if (pin.phase === "operation") {
+        await this.leases.complete(pin.session, pin.generation, pin.operation);
+        pin.phase = "idle";
+      }
+      if (pin.releaseAfterExit) await this.leases.release(pin.session, pin.generation);
+      this.foregroundPins.delete(foreground.pid);
     }
   }
 
@@ -794,10 +857,16 @@ export class CoreRuntime {
       if (unconfirmedForeground?.pid !== null && unconfirmedForeground?.pid !== undefined && operation !== undefined && this.leases !== undefined && activeProject.generation !== undefined) {
         const pid = unconfirmedForeground.pid;
         const retainedOperation = operation;
-        const pin = { session, generation: activeProject.generation, operation: retainedOperation, background: false };
+        const pin = {
+          session,
+          generation: activeProject.generation,
+          operation: retainedOperation,
+          phase: "operation" as "operation" | "background" | "idle",
+          releaseAfterExit: false,
+        };
         this.foregroundPins.set(pid, pin);
         await this.leases.complete(session, pin.generation, retainedOperation, [pid]).then(() => {
-          pin.background = true;
+          pin.phase = "background";
           operation = undefined;
         }).catch(() => undefined);
       }
@@ -933,27 +1002,23 @@ export class CoreRuntime {
     const closeTask = this.serializeBackground(async () => {
       const ownership = this.backgroundOwnership;
       if (ownership?.starting === true) await ownership.settled;
-      const processes = await this.processes.close();
+      let processes = await this.processes.close();
       const background = processes.background;
       await this.clearBackgroundPin(background);
       if (background.state !== "running") {
         this.processes.discardBackground(background.pid);
         this.backgroundOwnership = undefined;
       }
-      for (const foreground of processes.foreground) {
-        if (foreground.state === "running" || foreground.pid === null) continue;
-        const pin = this.foregroundPins.get(foreground.pid);
-        if (pin === undefined || this.leases === undefined) continue;
-        if (pin.background) await this.leases.backgroundExited(pin.session, pin.generation, pin.operation, foreground.pid);
-        else await this.leases.complete(pin.session, pin.generation, pin.operation);
-        this.foregroundPins.delete(foreground.pid);
-      }
+      await this.clearForegroundPins(processes.foreground);
       await Promise.all([...this.runningTasks]);
+      processes = await this.processes.close();
+      await this.clearForegroundPins(processes.foreground);
+      if (this.foregroundPins.size > 0) throw new Error("COMMAND_STOP_UNCONFIRMED");
       if (this.leases !== undefined) {
-        await Promise.all([...this.activeProjects].map(async ([session, project]) => {
-          if (project.generation !== undefined) await this.leases?.release(session, project.generation);
-        }));
-        this.activeProjects.clear();
+        for (const [session, project] of [...this.activeProjects]) {
+          if (project.generation !== undefined) await this.leases.release(session, project.generation);
+          if (this.activeProjects.get(session)?.generation === project.generation) this.activeProjects.delete(session);
+        }
         await this.leases.close();
       }
       await Promise.all([...this.temporaryProjects].map((path) => rm(path, { recursive: true, force: true })));

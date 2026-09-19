@@ -301,6 +301,66 @@ test("unconfirmed foreground groups keep ownership pinned until cooperative retr
   assert.equal((await successor.openProject(source, "error", undefined, "successor", { mode: "write" })).structuredContent.ok, true);
 });
 
+test("unconfirmed project-hook groups retain the candidate lease until cooperative retry", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-unconfirmed-hook-")));
+  const source = join(home, "projects/source"), registry = join(home, "registry");
+  await mkdir(source, { recursive: true });
+  let terminationConfirmed = false;
+  const processes = new ProcessManager(async () => terminationConfirmed);
+  const marker = join(source, "hook.started");
+  const hookScript = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started");setTimeout(() => process.exit(0), 500)`;
+  const hooks = [{ projectRoot: source, argv: [process.execPath, "-e", hookScript] }];
+  const runtime = new CoreRuntime([join(home, "projects")], hooks, [], undefined, new ProjectLeases(registry), processes);
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  t.after(async () => {
+    terminationConfirmed = true;
+    await runtime.close().catch(() => undefined); await successor.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+  const opening = runtime.openProject(source, "error", undefined, "worker", { mode: "write" });
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (await readFile(marker, "utf8").catch(() => undefined) === "started") break;
+    await delay(10);
+  }
+  assert.equal(await readFile(marker, "utf8"), "started");
+  await assert.rejects(runtime.close(), { message: "COMMAND_STOP_UNCONFIRMED" });
+  const opened = await opening;
+  assert.equal(opened.structuredContent.error.code, "PROJECT_HOOK_FAILED");
+  assert.equal((await successor.openProject(source, "error", undefined, "successor", { mode: "write" })).structuredContent.error.code, "PROJECT_IN_USE");
+  terminationConfirmed = true;
+  await runtime.close();
+  assert.equal((await successor.openProject(source, "error", undefined, "successor", { mode: "write" })).structuredContent.ok, true);
+});
+
+test("multi-session shutdown retries only leases that remain active", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-close-retry-")));
+  const source = join(home, "projects/source"), evidence = join(home, "projects/evidence"), registry = join(home, "registry");
+  await mkdir(source, { recursive: true }); await mkdir(evidence, { recursive: true });
+  const leases = new ProjectLeases(registry);
+  const runtime = new CoreRuntime([join(home, "projects")], [], [], undefined, leases);
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  t.after(async () => {
+    await runtime.close().catch(() => undefined); await successor.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+  assert.equal((await runtime.openProject(source, "error", undefined, "one", { mode: "write" })).structuredContent.ok, true);
+  assert.equal((await runtime.openProject(evidence, "error", undefined, "two", { mode: "write" })).structuredContent.ok, true);
+  const originalRelease = leases.release.bind(leases), calls = new Map();
+  let failSecond = true;
+  leases.release = async (session, ...args) => {
+    calls.set(session, (calls.get(session) ?? 0) + 1);
+    if (session === "two" && failSecond) { failSecond = false; throw new Error("TEST_RELEASE_FAILURE"); }
+    return await originalRelease(session, ...args);
+  };
+  await assert.rejects(runtime.close(), { message: "TEST_RELEASE_FAILURE" });
+  assert.equal(runtime.currentProject("one").structuredContent.data.path, null);
+  assert.equal(runtime.currentProject("two").structuredContent.data.path, evidence);
+  await runtime.close();
+  assert.deepEqual(Object.fromEntries(calls), { one: 1, two: 2 });
+  assert.equal((await successor.openProject(source, "error", undefined, "successor-one", { mode: "write" })).structuredContent.ok, true);
+  assert.equal((await successor.openProject(evidence, "error", undefined, "successor-two", { mode: "write" })).structuredContent.ok, true);
+});
+
 test("shutdown waits for foreground operation completion before releasing the lease", { timeout: 30000 }, async t => {
   const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-foreground-close-race-")));
   const source = join(home, "projects/source");
