@@ -214,6 +214,78 @@ test("same-path reopen revalidates explicit lease constraints", { timeout: 30000
   assert.equal((await a.call("worker", "project.current")).data.generation, renewed.data.generation);
 });
 
+test("concurrent opens in one session serialize without stranding a generation", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-open-race-")));
+  const source = join(home, "projects/source");
+  const evidence = join(home, "projects/evidence");
+  const registry = join(home, "registry");
+  await mkdir(source, { recursive: true });
+  await mkdir(evidence, { recursive: true });
+  const runtime = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  t.after(async () => {
+    await runtime.close().catch(() => undefined);
+    await successor.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const [first, second] = await Promise.all([
+    runtime.openProject(source, "error", undefined, "worker", { mode: "write" }),
+    runtime.openProject(evidence, "error", undefined, "worker", { mode: "write" }),
+  ]);
+  assert.equal(first.structuredContent.ok, true, JSON.stringify(first.structuredContent));
+  assert.equal(second.structuredContent.ok, true, JSON.stringify(second.structuredContent));
+  assert.equal(runtime.currentProject("worker").structuredContent.data.path, evidence);
+  const acquired = await successor.openProject(source, "error", undefined, "successor", { mode: "write" });
+  assert.equal(acquired.structuredContent.ok, true, JSON.stringify(acquired.structuredContent));
+  const blocked = await successor.openProject(evidence, "error", undefined, "successor", { mode: "write" });
+  assert.equal(blocked.structuredContent.error.code, "PROJECT_IN_USE");
+});
+
+test("shutdown waits for foreground operation completion before releasing the lease", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-foreground-close-race-")));
+  const source = join(home, "projects/source");
+  const registry = join(home, "registry");
+  await mkdir(source, { recursive: true });
+  const leases = new ProjectLeases(registry);
+  const runtime = new CoreRuntime([join(home, "projects")], [], [], undefined, leases);
+  t.after(async () => {
+    await runtime.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+  const opened = await runtime.openProject(source, "error", undefined, "worker", { mode: "write" });
+  assert.equal(opened.structuredContent.ok, true, JSON.stringify(opened.structuredContent));
+
+  const originalComplete = leases.complete.bind(leases);
+  let completionEntered;
+  const entered = new Promise(resolve => { completionEntered = resolve; });
+  let allowCompletion;
+  const completionGate = new Promise(resolve => { allowCompletion = resolve; });
+  leases.complete = async (...args) => {
+    if (!Array.isArray(args[3]) || args[3].length === 0) {
+      completionEntered();
+      await completionGate;
+    }
+    return await originalComplete(...args);
+  };
+
+  const running = runtime.run([process.execPath, "-e", "process.exit(0)"], false, undefined, undefined, false, undefined, "worker");
+  await entered;
+  let closed = false;
+  const closing = runtime.close().then(() => { closed = true; });
+  await delay(50);
+  assert.equal(closed, false);
+  allowCompletion();
+  assert.equal((await running).structuredContent.ok, true);
+  await closing;
+  assert.equal(closed, true);
+
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  const acquired = await successor.openProject(source, "error", undefined, "successor", { mode: "write" });
+  assert.equal(acquired.structuredContent.ok, true, JSON.stringify(acquired.structuredContent));
+  await successor.close();
+});
+
 test("shutdown waits for pre-pin background registration before releasing the lease", { timeout: 30000 }, async t => {
   const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-shutdown-race-")));
   const source = join(home, "projects/source");

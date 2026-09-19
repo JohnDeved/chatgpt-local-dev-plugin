@@ -299,6 +299,8 @@ export class CoreRuntime {
   private backgroundSequence = 0;
   private closing = false;
   private closeTask: Promise<void> | undefined;
+  private readonly projectQueues = new Map<string, Promise<void>>();
+  private readonly runningTasks = new Set<Promise<void>>();
   private downstreamQueue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -325,6 +327,19 @@ export class CoreRuntime {
     await previous;
     try { return await action(); }
     finally { release(); }
+  }
+
+  private async serializeProject<T>(session: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.projectQueues.get(session) ?? Promise.resolve();
+    let release: () => void = () => undefined;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.projectQueues.set(session, current);
+    await previous;
+    try { return await action(); }
+    finally {
+      release();
+      if (this.projectQueues.get(session) === current) this.projectQueues.delete(session);
+    }
   }
 
   private bindingsForTool(tool: string): ProjectBinding[] {
@@ -364,6 +379,17 @@ export class CoreRuntime {
   }
 
   async openProject(
+    query: string,
+    onMissing: MissingProjectAction = "error",
+    progress?: ToolProgress,
+    session = "runtime",
+    options: OpenLeaseOptions = { mode: "write" },
+  ): Promise<ToolCallResult> {
+    if (this.closing) return failure("project.open", "RUNTIME_CLOSING", "The runtime is closing and cannot open a project.");
+    return await this.serializeProject(session, async () => await this.openProjectTransition(query, onMissing, progress, session, options));
+  }
+
+  private async openProjectTransition(
     query: string,
     onMissing: MissingProjectAction = "error",
     progress?: ToolProgress,
@@ -654,12 +680,15 @@ export class CoreRuntime {
       if (typeof claimed !== "number") return claimed;
       backgroundToken = claimed;
     }
+    let settleRun: () => void = () => undefined;
+    const runningTask = new Promise<void>((resolve) => { settleRun = resolve; });
+    this.runningTasks.add(runningTask);
     const label = commandLabel(argv);
-    await progress?.report(background ? `Starting ${label} in the background…` : `Running ${label}…`, 0.1);
     const stopHeartbeat = background ? () => undefined : commandHeartbeat(progress, label);
     let operation: string | undefined;
     let backgroundRetained = false;
     try {
+      await progress?.report(background ? `Starting ${label} in the background…` : `Running ${label}…`, 0.1);
       if (this.leases !== undefined && activeProject.generation !== undefined) {
         operation = await this.leases.access(session, activeProject.generation, true);
       }
@@ -735,6 +764,8 @@ export class CoreRuntime {
         }
         ownership.settle();
       }
+      settleRun();
+      this.runningTasks.delete(runningTask);
       stopHeartbeat();
     }
   }
@@ -858,6 +889,7 @@ export class CoreRuntime {
         this.processes.discardBackground(background.pid);
         this.backgroundOwnership = undefined;
       }
+      await Promise.all([...this.runningTasks]);
       if (this.leases !== undefined) {
         await Promise.all([...this.activeProjects].map(async ([session, project]) => {
           if (project.generation !== undefined) await this.leases?.release(session, project.generation);
