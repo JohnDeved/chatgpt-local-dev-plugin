@@ -144,6 +144,8 @@ export async function runServer(): Promise<void> {
     await activity.close();
     await server.close();
   };
+  // Stdio transport does not emit onclose on EOF; close our owned runtime cooperatively.
+  process.stdin.once("end", () => void close());
   process.on("SIGINT", () => void close());
   process.on("SIGTERM", () => void close());
   server.onclose = () => void close();

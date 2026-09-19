@@ -1,0 +1,129 @@
+import assert from "node:assert/strict";
+import { fork, execFileSync } from "node:child_process";
+import { once } from "node:events";
+import { mkdir, mkdtemp, readFile, writeFile, rm, realpath, symlink, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import test from "node:test";
+import { LeaseStorage } from "../dist/lease-storage.js";
+
+async function fixture(t) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "localdev-provider-")));
+  const registry = join(root, "registry"), source = join(root, "source"), evidence = join(root, "evidence");
+  await mkdir(source); await mkdir(evidence); await writeFile(join(source, "receipt.json"), '{"head":"fixture"}');
+  const clients = [], calls = [];
+  t.after(async () => {
+    for (const c of clients) if (!c.exited()) { await c.call("close"); await c.exit; }
+    if (process.env.OWNERSHIP_TEST_RECEIPTS) {
+      await mkdir(process.env.OWNERSHIP_TEST_RECEIPTS, { recursive: true });
+      await writeFile(join(process.env.OWNERSHIP_TEST_RECEIPTS, t.name.replace(/[^a-z0-9]+/giu, "-") + ".json"), JSON.stringify({ test: t.name, pids: clients.map(c => c.pid), calls, allExited: clients.every(c => c.exited()) }, null, 2) + "\n");
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  async function client(name) {
+    const child = fork(new URL("./lease-client-fixture.mjs", import.meta.url), [registry], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    const exit = once(child, "exit");
+    assert.equal((await once(child, "message"))[0].ready, true); let sequence = 0;
+    const api = { pid: child.pid, exit, exited: () => child.exitCode !== null || child.signalCode !== null,
+      async call(action, args = {}) {
+        const id = ++sequence;
+        const result = new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error("CLIENT_TIMEOUT")), 10000);
+          const listener = response => { if (response.sequence !== id) return; clearTimeout(timeout); child.off("message", listener); resolve(response); };
+          child.on("message", listener);
+        });
+        child.send({ sequence: id, action, session: name, ...args }); const response = await result;
+        calls.push({ client: name, pid: child.pid, action, args, response }); return response;
+      } };
+    clients.push(api); return api;
+  }
+  return { root, registry, source, evidence, client };
+}
+const open = (client, path, mode = "read", extra = {}) => client.call("open", { path, options: { mode, ...extra } });
+
+test("provider real independent readers exclude a writer and release independently", { timeout: 20000 }, async t => {
+  const f = await fixture(t), a = await f.client("reader-a"), b = await f.client("reader-b"), c = await f.client("writer");
+  const [x, y] = await Promise.all([open(a, f.source), open(b, f.source)]);
+  assert.equal(x.ok, true, JSON.stringify(x)); assert.equal(y.ok, true, JSON.stringify(y));
+  assert.equal((await open(c, f.source, "write")).code, "PROJECT_IN_USE");
+  assert.equal((await a.call("access", { generation: x.value.lease.generation, write: true })).code, "PROJECT_READ_ONLY");
+  for (const [client, result] of [[a, x], [b, y]]) {
+    assert.equal((await client.call("access", { generation: result.value.lease.generation, write: false })).ok, true);
+    assert.equal(await readFile(join(f.source, "receipt.json"), "utf8"), '{"head":"fixture"}');
+    await client.call("complete", { generation: result.value.lease.generation, write: false });
+  }
+  await a.call("release", { generation: x.value.lease.generation });
+  assert.equal((await open(c, f.source, "write")).code, "PROJECT_IN_USE");
+  await b.call("release", { generation: y.value.lease.generation });
+  assert.equal((await open(c, f.source, "write")).ok, true);
+});
+
+test("provider source-evidence switch yields only independent-acquisition release proof", { timeout: 20000 }, async t => {
+  const f = await fixture(t), a = await f.client("worker"), b = await f.client("reviewer");
+  const x = await open(a, f.source, "write"); assert.equal(x.ok, true);
+  const y = await a.call("open", { path: f.evidence, options: { mode: "read" }, previous: x.value.lease.generation });
+  assert.equal(y.ok, true, JSON.stringify(y)); const ticket = y.value.previousRelease.handoffId;
+  assert.equal((await a.call("handoff", { id: ticket })).value.released, false);
+  const acquired = await open(b, f.source, "read", { handoffId: ticket }); assert.equal(acquired.ok, true, JSON.stringify(acquired));
+  const proof = (await a.call("handoff", { id: ticket })).value;
+  assert.equal(proof.released, true); assert.equal(proof.receipt.from.pid, a.pid); assert.equal(proof.receipt.to.pid, b.pid);
+  assert.notEqual(proof.receipt.from.runtime, proof.receipt.to.runtime);
+});
+
+test("provider reconciles a real dead idle process and preserves exclusive writers", { timeout: 20000 }, async t => {
+  const f = await fixture(t), a = await f.client("dead"), b = await f.client("successor"), c = await f.client("racer");
+  assert.equal((await open(a, f.source, "write")).ok, true); await a.call("exit-with-lease"); await a.exit;
+  const choices = await Promise.all([open(b, f.source, "write"), open(c, f.source, "write")]);
+  assert.equal(choices.filter(x => x.ok).length, 1, JSON.stringify(choices));
+  assert.equal(choices.filter(x => x.code === "PROJECT_IN_USE").length, 1);
+});
+
+test("provider idle expiration fences old generations; force-release is scoped and audited", { timeout: 20000 }, async t => {
+  const f = await fixture(t), a = await f.client("old"), b = await f.client("new");
+  const old = await open(a, f.source, "read", { leaseMs: 1000 }); assert.equal(old.ok, true);
+  const generation = old.value.lease.generation;
+  assert.equal((await b.call("force", { path: f.source, generation, reason: "cannot revoke active owner" })).code, "LEASE_NOT_RECLAIMABLE");
+  await delay(1200);
+  const force = await b.call("force", { path: f.source, generation, reason: "expired idle lease" }); assert.equal(force.ok, true, JSON.stringify(force));
+  assert.equal((await a.call("access", { generation, write: false })).code, "PROJECT_BINDING_REVOKED");
+  const replacement = await open(b, f.source, "write"); assert.equal(replacement.ok, true);
+  assert.equal((await a.call("force", { path: f.source, generation, reason: "cannot revoke a replacement generation" })).code, "LEASE_GENERATION_MISMATCH");
+  const envelope = JSON.parse(await readFile(join(f.registry, "state.json"), "utf8")), state = JSON.parse(envelope.payload);
+  assert.ok(state.audit.some(x => x.action === "force-released" && x.generation === generation));
+});
+
+test("provider refuses to expire active writer operations or claimed background work", { timeout: 20000 }, async t => {
+  const f = await fixture(t), a = await f.client("writer"), b = await f.client("reviewer");
+  const x = await open(a, f.source, "write", { leaseMs: 1000 }); const generation = x.value.lease.generation;
+  await a.call("access", { generation, write: true }); await delay(1200);
+  assert.equal((await open(b, f.source)).code, "PROJECT_IN_USE");
+  assert.equal((await a.call("release", { generation })).code, "PROJECT_HAS_ACTIVE_WORK");
+  await a.call("complete", { generation, write: true, background: [a.pid] });
+  assert.equal((await a.call("release", { generation })).code, "PROJECT_HAS_ACTIVE_WORK");
+  await a.call("access", { generation, write: false }); await a.call("complete", { generation, write: false, background: [] });
+  assert.equal((await a.call("release", { generation })).ok, true);
+});
+
+test("provider canonicalizes aliases and rejects wrong source heads without acquiring", { timeout: 20000 }, async t => {
+  const f = await fixture(t), a = await f.client("a"), b = await f.client("b");
+  const git = (...args) => execFileSync("git", ["-C", f.source, ...args], { encoding: "utf8" }).trim();
+  git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "test@example.com"); git("add", "."); git("commit", "-qm", "source");
+  const head = git("rev-parse", "HEAD");
+  assert.equal((await open(a, f.source, "write", { expectedHead: "a".repeat(40) })).code, "PROJECT_HEAD_MISMATCH");
+  const x = await open(a, f.source, "write", { expectedHead: head }); assert.equal(x.ok, true);
+  const alias = join(f.root, "alias"); await symlink(f.source, alias);
+  assert.equal((await open(b, alias)).code, "PROJECT_IN_USE");
+  const markerBefore = await stat(join(f.registry, "transaction.lock"));
+  await a.call("release", { generation: x.value.lease.generation }); await open(b, alias);
+  assert.equal((await stat(join(f.registry, "transaction.lock"))).ino, markerBefore.ino, "cooperative transitions never unlink the lock");
+});
+
+test("injected signed store rejects tampering and keeps private permissions", async t => {
+  const f = await fixture(t), store = new LeaseStorage(f.registry, () => ({ n: 0 }), x => x);
+  await store.transaction(async state => { state.n++; });
+  const path = join(f.registry, "state.json"), envelope = JSON.parse(await readFile(path, "utf8"));
+  envelope.payload = '{"n":999}'; await writeFile(path, JSON.stringify(envelope));
+  await assert.rejects(store.transaction(async state => state.n), { message: "REGISTRY_AUTHENTICATION_FAILED" });
+  assert.equal((await stat(path)).mode & 0o077, 0);
+});

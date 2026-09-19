@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -57,7 +57,9 @@ async function environment(t) {
         if (api.exited) return;
         const exit = once(child, "exit"); child.stdin.end();
         // Cooperative transport close only; never kill a test or other process.
-        await Promise.race([exit, delay(10000).then(() => { if (!api.exited) throw new Error("COOPERATIVE_SHUTDOWN_FAILED"); })]);
+        let timer;
+        try { await Promise.race([exit, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("COOPERATIVE_SHUTDOWN_FAILED")), 10000); })]); }
+        finally { clearTimeout(timer); }
       },
       async call(session, name, args = {}) {
         const reply = await request("tools/call", { name, arguments: args, _meta: { "openai/session": session } });
