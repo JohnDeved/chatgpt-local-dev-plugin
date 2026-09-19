@@ -1021,7 +1021,15 @@ export class CoreRuntime {
       if (this.foregroundPins.size > 0) throw new Error("COMMAND_STOP_UNCONFIRMED");
       if (this.leases !== undefined) {
         for (const [session, project] of [...this.activeProjects]) {
-          if (project.generation !== undefined) await this.leases.release(session, project.generation);
+          if (project.generation !== undefined) {
+            try { await this.leases.release(session, project.generation); }
+            catch (error) {
+              // A cooperative force-release by another runtime already removed
+              // this exact generation. Treat that binding as released while
+              // preserving retryable shutdown for every other provider error.
+              if (!(error instanceof LeaseError) || error.code !== "PROJECT_BINDING_REVOKED") throw error;
+            }
+          }
           if (this.activeProjects.get(session)?.generation === project.generation) this.activeProjects.delete(session);
         }
         await this.leases.close();
