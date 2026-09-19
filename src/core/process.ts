@@ -85,7 +85,10 @@ function start(argv: string[], cwd: string, background: boolean): TrackedProcess
   child.on("spawn", () => resolveStarted(true));
   child.on("close", (code, signal) => {
     tracked.exitCode = code; tracked.signal = signal;
-    tracked.finishedAt = new Date().toISOString(); resolveExit();
+    void terminateCommand(child).then((confirmed) => {
+      if (confirmed) tracked.finishedAt = new Date().toISOString();
+      resolveExit();
+    }, () => resolveExit());
   });
   return tracked;
 }
@@ -99,6 +102,7 @@ function validateArgv(argv: string[]): void {
 
 export class ProcessManager {
   private background: TrackedProcess | undefined;
+  private closing = false;
   private readonly foreground = new Set<TrackedProcess>();
 
   hasRunningBackground(): boolean {
@@ -106,11 +110,12 @@ export class ProcessManager {
   }
 
   async run(argv: string[], cwd: string, background: boolean, timeoutMs?: number): Promise<ProcessSnapshot> {
+    if (this.closing) throw new Error("RUNTIME_CLOSING");
     validateArgv(argv);
     const signal = currentActivity()?.signal;
     signal?.throwIfAborted();
     if (background) {
-      if (this.hasRunningBackground()) throw new Error("BACKGROUND_BUSY");
+      if (this.background !== undefined) throw new Error("BACKGROUND_BUSY");
       this.background = start(argv, cwd, true);
       if (!(await this.background.started)) {
         await this.background.exited;
@@ -150,6 +155,11 @@ export class ProcessManager {
 
   poll(): ProcessSnapshot { return snapshot(this.background); }
 
+  backgroundExit(): Promise<ProcessSnapshot> | undefined {
+    const tracked = this.background;
+    return tracked === undefined ? undefined : tracked.exited.then(() => snapshot(tracked));
+  }
+
   async wait(waitMs: number): Promise<ProcessSnapshot> {
     const tracked = this.background;
     if (tracked === undefined || tracked.finishedAt !== null || waitMs <= 0) return snapshot(tracked);
@@ -177,13 +187,20 @@ export class ProcessManager {
     const tracked = this.background;
     if (tracked === undefined) return snapshot(undefined);
     const confirmed = await terminateCommand(tracked.child);
-    const result = snapshot(tracked);
-    if (confirmed) this.background = undefined;
-    return result;
+    if (confirmed && tracked.finishedAt === null) tracked.finishedAt = new Date().toISOString();
+    return snapshot(tracked);
   }
 
-  async close(): Promise<void> {
+  discardBackground(pid: number | null): boolean {
+    const current = snapshot(this.background);
+    if (current.state === "running" || current.pid !== pid) return false;
+    this.background = undefined;
+    return true;
+  }
+
+  async close(): Promise<ProcessSnapshot> {
+    this.closing = true;
     await Promise.allSettled([...this.foreground].map((tracked) => terminateCommand(tracked.child)));
-    await this.stop();
+    return await this.stop();
   }
 }

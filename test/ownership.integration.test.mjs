@@ -1,17 +1,27 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
+import { CoreRuntime } from "../dist/core/runtime.js";
+import { ProjectLeases } from "../dist/project-leases.js";
 
-async function environment(t) {
+async function environment(t, options = {}) {
   const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-reader-leases-")));
   for (const path of [".codex", ".local-dev/activity", "projects/source", "projects/evidence"]) await mkdir(join(home, path), { recursive: true, mode: 0o700 });
   await writeFile(join(home, ".codex/config.toml"), "# isolated test registry\n");
-  await writeFile(join(home, ".local-dev/config.json"), JSON.stringify({ version: 1, projectRoots: [join(home, "projects")], selectedServers: [], projectBindings: [], projectOpenHooks: [] }));
+  await writeFile(join(home, ".local-dev/config.json"), JSON.stringify({
+    version: 1,
+    projectRoots: [join(home, "projects")],
+    selectedServers: [],
+    projectBindings: [],
+    projectOpenHooks: options.failingEvidenceHook
+      ? [{ projectRoot: join(home, "projects/evidence"), argv: [process.execPath, "-e", "process.exit(7)"] }]
+      : [],
+  }));
   // Only this disposable test HOME changes approval settings; production never does.
   await writeFile(join(home, ".local-dev/activity/settings.json"), JSON.stringify({ autoApprove: true, remember: true }), { mode: 0o600 });
   await writeFile(join(home, "projects/source/receipt.txt"), "reviewable source receipt\n");
@@ -135,4 +145,253 @@ test("expired idle owner is fenced and force-release cannot evict a live generat
   const writer = await b.call("successor", "project.open", { query: f.source, mode: "write" }); assert.equal(writer.ok, true);
   assert.equal((await a.call("idle", "project.read", { path: "receipt.txt" })).error.code, "PROJECT_BINDING_REVOKED");
   assert.equal((await b.call("successor", "project.forceRelease", { path: f.source, generation: lease.data.generation, reason: "stale generation must not affect successor" })).error.code, "LEASE_GENERATION_MISMATCH");
+  assert.equal((await b.call("successor", "project.release", { generation: writer.data.generation })).ok, true);
+  const reopened = await a.call("idle", "project.open", { query: f.source, mode: "read" });
+  assert.equal(reopened.ok, true, JSON.stringify(reopened));
+  assert.notEqual(reopened.data.generation, lease.data.generation);
+});
+
+test("background work pins its generation and retained snapshot to one session", { timeout: 30000 }, async t => {
+  const f = await environment(t), a = await f.client("worker");
+  await a.ready("worker");
+  await a.ready("peer");
+  const lease = await a.call("worker", "project.open", { query: f.source, mode: "write" });
+  assert.equal(lease.ok, true);
+  const childPidFile = join(f.source, "child.pid");
+  const childScript = `require("node:fs").writeFileSync(${JSON.stringify(childPidFile)}, String(process.pid));setInterval(() => {}, 1000)`;
+  const leaderScript = `const {spawn}=require("node:child_process");const child=spawn(process.execPath,["-e",${JSON.stringify(childScript)}],{stdio:"ignore"});child.unref();setTimeout(() => process.exit(0), 500)`;
+  const starting = a.call("worker", "dev.run", {
+    argv: [process.execPath, "-e", leaderScript],
+    background: true,
+  });
+  assert.equal((await a.call("peer", "dev.stop")).error.code, "BACKGROUND_NOT_OWNED");
+  assert.equal((await starting).ok, true);
+  assert.equal((await a.call("worker", "project.release", { generation: lease.data.generation })).error.code, "PROJECT_HAS_ACTIVE_WORK");
+  await delay(700);
+  assert.equal((await a.call("peer", "dev.poll")).error.code, "BACKGROUND_NOT_OWNED");
+  assert.equal((await a.call("worker", "dev.poll", { waitMs: 5000 })).data.state, "exited");
+  const childPid = Number(await readFile(childPidFile, "utf8"));
+  assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+  assert.equal((await a.call("worker", "project.release", { generation: lease.data.generation })).ok, true);
+});
+
+test("concurrent replacement claims cannot stop the winning background process", { timeout: 30000 }, async t => {
+  const f = await environment(t), a = await f.client("multiplex");
+  await a.ready("one"); await a.ready("two");
+  assert.equal((await a.call("one", "project.open", { query: f.source, mode: "write" })).ok, true);
+  assert.equal((await a.call("two", "project.open", { query: f.evidence, mode: "write" })).ok, true);
+  assert.equal((await a.call("one", "dev.run", {
+    argv: [process.execPath, "-e", "setTimeout(() => process.exit(0), 100)"],
+    background: true,
+  })).ok, true);
+  await delay(300);
+  const starts = await Promise.all([
+    a.call("one", "dev.run", { argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"], background: true }),
+    a.call("two", "dev.run", { argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"], background: true }),
+  ]);
+  const winners = starts.map((value, index) => ({ value, session: index === 0 ? "one" : "two" })).filter(entry => entry.value.ok);
+  assert.equal(winners.length, 1, JSON.stringify(starts));
+  const loser = starts.find(value => !value.ok);
+  assert.ok(["BACKGROUND_BUSY", "BACKGROUND_NOT_OWNED"].includes(loser.error.code), JSON.stringify(loser));
+  const winner = winners[0];
+  assert.equal((await a.call(winner.session, "dev.poll")).data.state, "running");
+  assert.equal((await a.call(winner.session, "dev.stop")).data.state, "exited");
+});
+
+test("same-path reopen revalidates explicit lease constraints", { timeout: 30000 }, async t => {
+  const f = await environment(t), a = await f.client("worker");
+  await a.ready("worker");
+  const first = await a.call("worker", "project.open", { query: f.source, mode: "write" });
+  assert.equal(first.ok, true);
+  const renewed = await a.call("worker", "project.open", { query: f.source, mode: "write", leaseMs: 1000 });
+  assert.equal(renewed.ok, true, JSON.stringify(renewed));
+  assert.notEqual(renewed.data.generation, first.data.generation);
+  assert.equal((await a.call("worker", "project.open", {
+    query: f.source,
+    mode: "write",
+    expectedHead: "0000000000000000000000000000000000000000",
+  })).error.code, "PROJECT_HEAD_MISMATCH");
+  assert.equal((await a.call("worker", "project.current")).data.generation, renewed.data.generation);
+});
+
+test("concurrent opens in one session serialize without stranding a generation", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-open-race-")));
+  const source = join(home, "projects/source");
+  const evidence = join(home, "projects/evidence");
+  const registry = join(home, "registry");
+  await mkdir(source, { recursive: true });
+  await mkdir(evidence, { recursive: true });
+  const runtime = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  t.after(async () => {
+    await runtime.close().catch(() => undefined);
+    await successor.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const [first, second] = await Promise.all([
+    runtime.openProject(source, "error", undefined, "worker", { mode: "write" }),
+    runtime.openProject(evidence, "error", undefined, "worker", { mode: "write" }),
+  ]);
+  assert.equal(first.structuredContent.ok, true, JSON.stringify(first.structuredContent));
+  assert.equal(second.structuredContent.ok, true, JSON.stringify(second.structuredContent));
+  assert.equal(runtime.currentProject("worker").structuredContent.data.path, evidence);
+  const acquired = await successor.openProject(source, "error", undefined, "successor", { mode: "write" });
+  assert.equal(acquired.structuredContent.ok, true, JSON.stringify(acquired.structuredContent));
+  const blocked = await successor.openProject(evidence, "error", undefined, "successor", { mode: "write" });
+  assert.equal(blocked.structuredContent.error.code, "PROJECT_IN_USE");
+});
+
+test("shutdown waits for foreground operation completion before releasing the lease", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-foreground-close-race-")));
+  const source = join(home, "projects/source");
+  const registry = join(home, "registry");
+  await mkdir(source, { recursive: true });
+  const leases = new ProjectLeases(registry);
+  const runtime = new CoreRuntime([join(home, "projects")], [], [], undefined, leases);
+  t.after(async () => {
+    await runtime.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+  const opened = await runtime.openProject(source, "error", undefined, "worker", { mode: "write" });
+  assert.equal(opened.structuredContent.ok, true, JSON.stringify(opened.structuredContent));
+
+  const originalComplete = leases.complete.bind(leases);
+  let completionEntered;
+  const entered = new Promise(resolve => { completionEntered = resolve; });
+  let allowCompletion;
+  const completionGate = new Promise(resolve => { allowCompletion = resolve; });
+  leases.complete = async (...args) => {
+    if (!Array.isArray(args[3]) || args[3].length === 0) {
+      completionEntered();
+      await completionGate;
+    }
+    return await originalComplete(...args);
+  };
+
+  const running = runtime.run([process.execPath, "-e", "process.exit(0)"], false, undefined, undefined, false, undefined, "worker");
+  await entered;
+  let closed = false;
+  const closing = runtime.close().then(() => { closed = true; });
+  await delay(50);
+  assert.equal(closed, false);
+  allowCompletion();
+  assert.equal((await running).structuredContent.ok, true);
+  await closing;
+  assert.equal(closed, true);
+
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  const acquired = await successor.openProject(source, "error", undefined, "successor", { mode: "write" });
+  assert.equal(acquired.structuredContent.ok, true, JSON.stringify(acquired.structuredContent));
+  await successor.close();
+});
+
+test("shutdown waits for project-open hook completion before closing the provider", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-hook-close-race-")));
+  const source = join(home, "projects/source");
+  const registry = join(home, "registry");
+  await mkdir(source, { recursive: true });
+  const leases = new ProjectLeases(registry);
+  const hooks = [{ projectRoot: source, argv: [process.execPath, "-e", "process.exit(0)"] }];
+  const runtime = new CoreRuntime([join(home, "projects")], hooks, [], undefined, leases);
+  t.after(async () => {
+    await runtime.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const originalComplete = leases.complete.bind(leases);
+  let completionEntered;
+  const entered = new Promise(resolve => { completionEntered = resolve; });
+  let allowCompletion;
+  const completionGate = new Promise(resolve => { allowCompletion = resolve; });
+  leases.complete = async (...args) => {
+    if (!Array.isArray(args[3]) || args[3].length === 0) {
+      completionEntered();
+      await completionGate;
+    }
+    return await originalComplete(...args);
+  };
+
+  const opening = runtime.openProject(source, "error", undefined, "worker", { mode: "write" });
+  await entered;
+  let closed = false;
+  const closing = runtime.close().then(() => { closed = true; });
+  await delay(50);
+  assert.equal(closed, false);
+  allowCompletion();
+  assert.equal((await opening).structuredContent.ok, true);
+  await closing;
+  assert.equal(closed, true);
+
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  const acquired = await successor.openProject(source, "error", undefined, "successor", { mode: "write" });
+  assert.equal(acquired.structuredContent.ok, true, JSON.stringify(acquired.structuredContent));
+  await successor.close();
+});
+
+test("shutdown waits for pre-pin background registration before releasing the lease", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-shutdown-race-")));
+  const source = join(home, "projects/source");
+  const registry = join(home, "registry");
+  await mkdir(source, { recursive: true });
+  const leases = new ProjectLeases(registry);
+  const runtime = new CoreRuntime([join(home, "projects")], [], [], undefined, leases);
+  t.after(async () => {
+    await runtime.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+  const opened = await runtime.openProject(source, "error", undefined, "worker", { mode: "write" });
+  assert.equal(opened.structuredContent.ok, true, JSON.stringify(opened.structuredContent));
+
+  const originalComplete = leases.complete.bind(leases);
+  let registerEntered;
+  const entered = new Promise(resolve => { registerEntered = resolve; });
+  let allowRegister;
+  const registrationGate = new Promise(resolve => { allowRegister = resolve; });
+  leases.complete = async (...args) => {
+    if (Array.isArray(args[3]) && args[3].length > 0) {
+      registerEntered();
+      await registrationGate;
+    }
+    return await originalComplete(...args);
+  };
+
+  const starting = runtime.run([process.execPath, "-e", "setInterval(() => {}, 1000)"], true, undefined, undefined, false, undefined, "worker");
+  await entered;
+  let closed = false;
+  const closing = runtime.close().then(() => { closed = true; });
+  await delay(50);
+  assert.equal(closed, false);
+  allowRegister();
+  assert.equal((await starting).structuredContent.ok, true);
+  await closing;
+  assert.equal(closed, true);
+
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  const acquired = await successor.openProject(source, "error", undefined, "successor", { mode: "write" });
+  assert.equal(acquired.structuredContent.ok, true, JSON.stringify(acquired.structuredContent));
+  await successor.close();
+});
+
+test("cooperative shutdown clears a confirmed-stopped background lease", { timeout: 30000 }, async t => {
+  const f = await environment(t), a = await f.client("worker"), b = await f.client("successor");
+  await a.ready("worker");
+  await b.ready("successor");
+  assert.equal((await a.call("worker", "project.open", { query: f.source, mode: "write" })).ok, true);
+  assert.equal((await a.call("worker", "dev.run", {
+    argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+    background: true,
+  })).ok, true);
+  await a.close();
+  const acquired = await b.call("successor", "project.open", { query: f.source, mode: "write" });
+  assert.equal(acquired.ok, true, JSON.stringify(acquired));
+});
+
+test("failed project setup preserves the previous authenticated binding", { timeout: 30000 }, async t => {
+  const f = await environment(t, { failingEvidenceHook: true }), a = await f.client("worker"), b = await f.client("peer");
+  await a.ready("worker"); await b.ready("peer");
+  assert.equal((await a.call("worker", "project.open", { query: f.source, mode: "write" })).ok, true);
+  assert.equal((await a.call("worker", "project.open", { query: f.evidence, mode: "write" })).error.code, "PROJECT_HOOK_FAILED");
+  assert.equal((await a.call("worker", "project.current")).data.path, f.source);
+  assert.equal((await b.call("peer", "project.open", { query: f.source, mode: "write" })).error.code, "PROJECT_IN_USE");
 });

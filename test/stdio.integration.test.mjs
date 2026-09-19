@@ -68,12 +68,15 @@ class McpProcess {
 async function fixture({ hook = false, proxy = false } = {}) {
   const home = await mkdtemp(join(tmpdir(), "local-dev-core-"));
   const project = join(home, "projects", "demo");
+  const other = join(home, "projects", "other");
   await mkdir(join(home, ".codex"), { recursive: true });
   await mkdir(join(home, ".local-dev", "activity"), { recursive: true, mode: 0o700 });
   // Explicit fixture policy; production defaults remain approval-required.
   await writeFile(join(home, ".local-dev", "activity", "settings.json"), JSON.stringify({ autoApprove: true, remember: true }), { mode: 0o600 });
   await mkdir(project, { recursive: true });
+  await mkdir(other, { recursive: true });
   await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo-project" }), "utf8");
+  await writeFile(join(other, "package.json"), JSON.stringify({ name: "other-project" }), "utf8");
   const fakeServer = new URL("./fake-mcp-server.mjs", import.meta.url).pathname;
   const codexConfig = proxy
     ? `[mcp_servers.fake]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(fakeServer)}]\nenabled_tools = ["echo", "activate_project", "blocked"]\ndisabled_tools = ["blocked"]\nrequired = true\n`
@@ -90,7 +93,7 @@ async function fixture({ hook = false, proxy = false } = {}) {
     }] : [],
     projectBindings: proxy ? [{ server: "fixture", tool: "activate_project", arguments: { project: "${projectPath}" } }] : [],
   }), "utf8");
-  return { home, marker, project };
+  return { home, marker, other, project };
 }
 
 async function initialize(client) {
@@ -104,6 +107,25 @@ async function initialize(client) {
   const runId = started.result.structuredContent.data.run.id;
   await client.request("tools/call", { name: "run.update", arguments: { runId, summary: "Run the isolated integration assertions.", todos: [{ id: "verify", title: "Verify stdio behavior", status: "in_progress" }] } });
   return response;
+}
+
+async function readySession(client, session) {
+  const meta = { "openai/session": session };
+  const started = await client.request("tools/call", {
+    name: "run.start",
+    arguments: { goal: "Verify isolated session binding" },
+    _meta: meta,
+  });
+  const runId = started.result.structuredContent.data.run.id;
+  await client.request("tools/call", {
+    name: "run.update",
+    arguments: {
+      runId,
+      summary: "Run session binding assertions.",
+      todos: [{ id: "verify", title: "Verify session binding", status: "in_progress" }],
+    },
+    _meta: meta,
+  });
 }
 
 test("production stdio server exposes tool-only native tools with ChatGPT statuses", async () => {
@@ -120,6 +142,11 @@ test("production stdio server exposes tool-only native tools with ChatGPT status
     assert.deepEqual(listed.result.tools.map(({ name }) => name), [
       "project.open",
       "project.current",
+      "project.read",
+      "project.files",
+      "project.release",
+      "project.forceRelease",
+      "project.handoff",
       "dev.run",
       "dev.batch",
       "dev.poll",
@@ -308,7 +335,7 @@ test("opens a configured project and runs argv without a shell", async () => {
       name: "dev.poll",
       arguments: { waitMs: 2_000 },
     });
-    assert.equal(waited.result.structuredContent.data.state, "exited");
+    assert.equal(waited.result.structuredContent.data.state, "exited", JSON.stringify(waited.result.structuredContent));
     assert.equal(waited.result.structuredContent.data.outputTail, "waited");
     assert.ok(Date.now() - waitedAt >= 80);
     const invalidWait = await client.request("tools/call", {
@@ -369,6 +396,30 @@ test("synchronizes configured downstream project bindings", async () => {
   }
 });
 
+test("project-bound downstream tools rebind and guard each authenticated session", async () => {
+  const { home, other, project } = await fixture({ proxy: true });
+  const client = new McpProcess({ ...process.env, HOME: home });
+  const call = async (session, name, arguments_ = {}) => await client.request("tools/call", {
+    name,
+    arguments: arguments_,
+    _meta: { "openai/session": session },
+  });
+  try {
+    await initialize(client);
+    await readySession(client, "one");
+    await readySession(client, "two");
+    assert.equal((await call("one", "project.open", { query: project, mode: "read" })).result.structuredContent.ok, true);
+    assert.equal((await call("two", "project.open", { query: other, mode: "read" })).result.structuredContent.ok, true);
+    assert.equal((await call("one", "fixture.echo", { value: "one" })).result.structuredContent.activeProject, await realpath(project));
+    assert.equal((await call("two", "fixture.echo", { value: "two" })).result.structuredContent.activeProject, await realpath(other));
+    assert.equal((await call("one", "fixture.echo", { value: "again" })).result.structuredContent.activeProject, await realpath(project));
+    assert.equal((await call("one", "fixture.activate_project", { project: other })).result.structuredContent.error.code, "PROJECT_BINDING_MANAGED");
+  } finally {
+    client.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("tracks one background process, detects loopback URLs, and stops it", async () => {
   const { home } = await fixture();
   const client = new McpProcess({ ...process.env, HOME: home });
@@ -404,10 +455,11 @@ test("tracks one background process, detects loopback URLs, and stops it", async
 });
 
 test("paginates, filters, namespaces, sanitizes, and forwards downstream tools", async () => {
-  const { home } = await fixture({ proxy: true });
+  const { home, project } = await fixture({ proxy: true });
   const client = new McpProcess({ ...process.env, HOME: home });
   try {
     await initialize(client);
+    assert.equal((await client.request("tools/call", { name: "project.open", arguments: { query: project, mode: "read" } })).result.structuredContent.ok, true);
     const listed = await client.request("tools/list", {});
     const downstream = listed.result.tools.find(({ name }) => name === "fixture.echo");
     assert.ok(downstream);
@@ -423,7 +475,7 @@ test("paginates, filters, namespaces, sanitizes, and forwards downstream tools",
     assert.equal(typeof downstream._meta["openai/toolInvocation/invoked"], "string");
     const called = await client.request("tools/call", { name: "fixture.echo", arguments: { value: "proxied" } });
     assert.equal(called.result.content[0].text, "echo=proxied");
-    assert.deepEqual(called.result.structuredContent, { echoed: "proxied" });
+    assert.deepEqual(called.result.structuredContent, { echoed: "proxied", activeProject: await realpath(project) });
   } finally {
     client.close();
     await rm(home, { recursive: true, force: true });

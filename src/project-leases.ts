@@ -107,6 +107,7 @@ export class ProjectLeases {
     return await this.store.transaction(async state => {
       await this.reconcile(state);
       const old = previous ? this.owned(state, previous, owner) : undefined;
+      if (old?.pending) throw new LeaseError("PREVIOUS_LEASE_NOT_COMMITTED");
       if (old && !idle(old)) throw new LeaseError("PROJECT_HAS_ACTIVE_WORK");
       const blockers = state.leases.filter(value => value !== old && overlaps(value.scope.writeDomain, scope.writeDomain) && (value.mode === "write" || options.mode === "write"));
       if (blockers.length) throw new LeaseError("PROJECT_IN_USE", { requested: { path: scope.path, mode: options.mode }, blockers, recovery: "Choose an independent worktree, wait for the writer, or use scoped release. Active writers/readers are not silently evicted." });
@@ -138,6 +139,7 @@ export class ProjectLeases {
       const scope = await projectScope(next.scope.path);
       matches(scope, next.scope, next.mode === "read");
       const old = previous ? this.owned(state, previous, owner) : undefined;
+      if (old?.pending) throw new LeaseError("PREVIOUS_LEASE_NOT_COMMITTED");
       if (old && !idle(old)) throw new LeaseError("PROJECT_HAS_ACTIVE_WORK");
       const receipt = handoffId ? state.receipts.find(value => value.id === handoffId) : undefined;
       if (handoffId) {

@@ -46,7 +46,10 @@ export interface WorkerRun {
 }
 interface TrackedRun { run: WorkerRun; owner: string; active: number; }
 type Emit = (type: string, detail: unknown, runId: string) => void;
-const NATIVE_ENVELOPES = new Set(["project.open", "project.current", "dev.run", "dev.batch", "dev.poll", "dev.stop", "dev.diff", "run.start", "run.update", "run.finish"]);
+const NATIVE_ENVELOPES = new Set([
+  "project.open", "project.current", "project.read", "project.files", "project.release", "project.forceRelease", "project.handoff",
+  "dev.run", "dev.batch", "dev.poll", "dev.stop", "dev.diff", "run.start", "run.update", "run.finish",
+]);
 
 /** Use only supplied metadata; never infer a conversation from synthesized Chrome turn IDs. */
 export function runOwner(meta?: Record<string, unknown>, transportSession?: string): string {
