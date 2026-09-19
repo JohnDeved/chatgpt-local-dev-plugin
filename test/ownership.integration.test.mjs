@@ -7,11 +7,19 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 
-async function environment(t) {
+async function environment(t, options = {}) {
   const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-reader-leases-")));
   for (const path of [".codex", ".local-dev/activity", "projects/source", "projects/evidence"]) await mkdir(join(home, path), { recursive: true, mode: 0o700 });
   await writeFile(join(home, ".codex/config.toml"), "# isolated test registry\n");
-  await writeFile(join(home, ".local-dev/config.json"), JSON.stringify({ version: 1, projectRoots: [join(home, "projects")], selectedServers: [], projectBindings: [], projectOpenHooks: [] }));
+  await writeFile(join(home, ".local-dev/config.json"), JSON.stringify({
+    version: 1,
+    projectRoots: [join(home, "projects")],
+    selectedServers: [],
+    projectBindings: [],
+    projectOpenHooks: options.failingEvidenceHook
+      ? [{ projectRoot: join(home, "projects/evidence"), argv: [process.execPath, "-e", "process.exit(7)"] }]
+      : [],
+  }));
   // Only this disposable test HOME changes approval settings; production never does.
   await writeFile(join(home, ".local-dev/activity/settings.json"), JSON.stringify({ autoApprove: true, remember: true }), { mode: 0o600 });
   await writeFile(join(home, "projects/source/receipt.txt"), "reviewable source receipt\n");
@@ -135,4 +143,28 @@ test("expired idle owner is fenced and force-release cannot evict a live generat
   const writer = await b.call("successor", "project.open", { query: f.source, mode: "write" }); assert.equal(writer.ok, true);
   assert.equal((await a.call("idle", "project.read", { path: "receipt.txt" })).error.code, "PROJECT_BINDING_REVOKED");
   assert.equal((await b.call("successor", "project.forceRelease", { path: f.source, generation: lease.data.generation, reason: "stale generation must not affect successor" })).error.code, "LEASE_GENERATION_MISMATCH");
+});
+
+test("background work pins its generation until observed process exit", { timeout: 30000 }, async t => {
+  const f = await environment(t), a = await f.client("worker");
+  await a.ready("worker");
+  const lease = await a.call("worker", "project.open", { query: f.source, mode: "write" });
+  assert.equal(lease.ok, true);
+  const started = await a.call("worker", "dev.run", {
+    argv: [process.execPath, "-e", "setTimeout(() => process.exit(0), 1000)"],
+    background: true,
+  });
+  assert.equal(started.ok, true);
+  assert.equal((await a.call("worker", "project.release", { generation: lease.data.generation })).error.code, "PROJECT_HAS_ACTIVE_WORK");
+  assert.equal((await a.call("worker", "dev.poll", { waitMs: 5000 })).data.state, "exited");
+  assert.equal((await a.call("worker", "project.release", { generation: lease.data.generation })).ok, true);
+});
+
+test("failed project setup preserves the previous authenticated binding", { timeout: 30000 }, async t => {
+  const f = await environment(t, { failingEvidenceHook: true }), a = await f.client("worker"), b = await f.client("peer");
+  await a.ready("worker"); await b.ready("peer");
+  assert.equal((await a.call("worker", "project.open", { query: f.source, mode: "write" })).ok, true);
+  assert.equal((await a.call("worker", "project.open", { query: f.evidence, mode: "write" })).error.code, "PROJECT_HOOK_FAILED");
+  assert.equal((await a.call("worker", "project.current")).data.path, f.source);
+  assert.equal((await b.call("peer", "project.open", { query: f.source, mode: "write" })).error.code, "PROJECT_IN_USE");
 });

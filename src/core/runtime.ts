@@ -1,5 +1,5 @@
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import type { CallToolResult as McpCallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
@@ -7,6 +7,8 @@ import { currentActivity } from "../activity.js";
 import type { ProjectBinding, ProjectOpenHook } from "../config/types.js";
 import { isPathInside } from "../path.js";
 import type { ToolProgress } from "../progress.js";
+import { LeaseError } from "../lease-storage.js";
+import { ProjectLeases, type OpenLeaseOptions } from "../project-leases.js";
 import { failure, success } from "../result.js";
 import type { JsonObject, JsonValue, ToolCallResult } from "../types.js";
 import { commandLabel } from "./command-label.js";
@@ -27,15 +29,42 @@ type ProjectKind = "existing" | "created" | "temporary";
 interface ActiveProject {
   path: string;
   kind: ProjectKind;
+  generation?: string;
+  mode: "read" | "write";
 }
 
 type ProjectBindingInvoker = (
   exposedToolName: string,
   arguments_: Record<string, unknown>,
-) => Promise<CallToolResult | undefined>;
+) => Promise<McpCallToolResult | undefined>;
 
 function processData(snapshot: ProcessSnapshot): JsonValue {
   return { ...snapshot } as unknown as JsonValue;
+}
+
+function leaseFailure(tool: string, error: unknown): ToolCallResult {
+  if (!(error instanceof LeaseError)) throw error;
+  const blockers = Array.isArray(error.detail.blockers) ? error.detail.blockers.slice(0, 4).map((value) => {
+    const blocker = value as { generation?: unknown; mode?: unknown; scope?: { path?: unknown } };
+    return { generation: blocker.generation, mode: blocker.mode, path: blocker.scope?.path };
+  }) : undefined;
+  const data = {
+    ...(typeof error.detail.recovery === "string" ? { recovery: error.detail.recovery } : {}),
+    ...(error.detail.requested === undefined ? {} : { requested: error.detail.requested }),
+    ...(blockers === undefined ? {} : { blockers, blockerCount: (error.detail.blockers as unknown[]).length }),
+    ...(["path", "generation", "expected", "actual"].reduce<Record<string, unknown>>((result, key) => {
+      if (error.detail[key] !== undefined) result[key] = error.detail[key];
+      return result;
+    }, {})),
+  } as JsonValue;
+  return failure(tool, error.code, error.code.replaceAll("_", " ").toLowerCase(), data);
+}
+
+async function projectEntry(project: string, requested: string): Promise<string> {
+  if (isAbsolute(requested)) throw new Error("INVALID_PROJECT_PATH");
+  const candidate = await realpath(resolve(project, requested)).catch(() => { throw new Error("PROJECT_ENTRY_NOT_FOUND"); });
+  if (!isPathInside(project, candidate)) throw new Error("INVALID_PROJECT_PATH");
+  return candidate;
 }
 
 async function commandCwd(project: string, requested?: string): Promise<string> {
@@ -55,7 +84,7 @@ function substituted(value: JsonValue, projectPath: string): JsonValue {
   return value;
 }
 
-function resultFailure(result: CallToolResult): { failed: boolean; message?: string } {
+function resultFailure(result: McpCallToolResult): { failed: boolean; message?: string } {
   const text = result.content.find((block) => block.type === "text")?.text?.slice(0, 500);
   const structured = result.structuredContent as { ok?: unknown; error?: unknown } | undefined;
   const failed = result.isError === true || structured?.ok === false;
@@ -106,7 +135,7 @@ async function createTemporaryProject(query: string): Promise<string> {
 
 
 type ProjectResolution =
-  | { target: ActiveProject; error?: never }
+  | { target: Omit<ActiveProject, "generation" | "mode">; error?: never }
   | { target?: never; error: ToolCallResult };
 
 async function resolveProjectTarget(
@@ -252,21 +281,25 @@ function commandHeartbeat(progress: ToolProgress | undefined, label: string): ()
 }
 
 export class CoreRuntime {
-  private activeProject: ActiveProject | null = null;
+  private readonly activeProjects = new Map<string, ActiveProject>();
   private readonly processes = new ProcessManager();
   private readonly temporaryProjects = new Set<string>();
+  private backgroundPin: { session: string; generation: string; operation: string; pid: number } | undefined;
 
   constructor(
     private readonly roots: string[],
     private readonly projectOpenHooks: ProjectOpenHook[],
     private readonly projectBindings: ProjectBinding[] = [],
     private readonly invokeBinding?: ProjectBindingInvoker,
+    private readonly leases?: ProjectLeases,
   ) {}
 
   async openProject(
     query: string,
     onMissing: MissingProjectAction = "error",
     progress?: ToolProgress,
+    session = "runtime",
+    options: OpenLeaseOptions = { mode: "write" },
   ): Promise<ToolCallResult> {
     if (this.processes.hasRunningBackground()) {
       return failure("project.open", "BACKGROUND_RUNNING", "Stop the background process before switching projects.");
@@ -275,40 +308,214 @@ export class CoreRuntime {
     await progress?.report(`Searching configured projects for ${queryLabel}…`, 0.1);
     const resolved = await resolveProjectTarget(query, onMissing, this.roots);
     if (resolved.error !== undefined) return resolved.error;
-    const project = resolved.target;
+    let project: ActiveProject = { ...resolved.target, mode: options.mode };
     await progress?.report(`Resolved ${basename(project.path)}; checking project setup…`, 0.25);
-    const hooks = await matchingHooks(project.path, this.projectOpenHooks);
-    if (hooks.length === 0) await progress?.report("No project hooks configured; activating project…", 0.45);
-    const hookFailure = await runProjectHooks(project, hooks, this.processes, progress);
-    if (hookFailure !== undefined) return hookFailure;
+    const previous = this.activeProjects.get(session);
+    let previousRelease: JsonValue = null;
+    let bindings: JsonValue[] = [];
+    let warnings = 0;
+    let hooksRun = 0;
+    let candidateGeneration: string | undefined;
+    let candidateCommitted = false;
+    try {
+      if (this.leases !== undefined) {
+        if (previous?.path === project.path && previous.mode === options.mode && previous.generation !== undefined) {
+          await this.withOperation(session, previous, false, async () => undefined);
+          return success("project.open", {
+            path: previous.path, kind: previous.kind, mode: previous.mode, generation: previous.generation,
+            hooksRun: 0, bindings: [], bindingWarnings: 0, previousRelease: null,
+          }, `active=${previous.path} kind=${previous.kind} mode=${previous.mode}`);
+        }
+        if (previous?.path === project.path && previous.generation !== undefined) {
+          const reserved = await this.leases.reserve(session, project.path, options, previous.generation);
+          candidateGeneration = reserved.generation;
+          const committed = await this.leases.commit(session, reserved.generation, previous.generation, options.handoffId);
+          candidateCommitted = true;
+          project = { ...project, path: committed.lease.scope.path, generation: committed.lease.generation };
+          previousRelease = committed.previousRelease as unknown as JsonValue;
+          this.activeProjects.set(session, project);
+          candidateGeneration = undefined;
+          return success("project.open", {
+            path: project.path, kind: project.kind, mode: project.mode, generation: project.generation ?? null,
+            hooksRun: 0, bindings: [], bindingWarnings: 0, previousRelease,
+          }, `active=${project.path} kind=${project.kind} mode=${project.mode}`);
+        }
 
-    if (this.projectBindings.length === 0) {
-      await progress?.report("No downstream project bindings; activating project…", 0.75);
+        const reserved = await this.leases.reserve(session, project.path, options);
+        candidateGeneration = reserved.generation;
+        const committed = await this.leases.commit(session, reserved.generation, undefined, options.handoffId);
+        candidateCommitted = true;
+        project = { ...project, path: committed.lease.scope.path, generation: committed.lease.generation };
+        const hooks = await matchingHooks(project.path, this.projectOpenHooks);
+        hooksRun = hooks.length;
+        if (hooks.length > 0 && project.mode === "read") throw new LeaseError("PROJECT_READ_ONLY", { path: project.path });
+        if (hooks.length === 0) await progress?.report("No project hooks configured; activating project…", 0.45);
+        const setup = await this.withOperation(session, project, hooks.length > 0, async () => {
+          const hookFailure = await runProjectHooks(project, hooks, this.processes, progress);
+          if (hookFailure !== undefined) return { hookFailure, bindings: [] as JsonValue[] };
+          if (this.projectBindings.length === 0) await progress?.report("No downstream project bindings; activating project…", 0.75);
+          return { bindings: await projectBindingResults(project.path, this.projectBindings, this.invokeBinding, progress) };
+        });
+        if (setup.hookFailure !== undefined) {
+          await this.leases.release(session, committed.lease.generation);
+          candidateGeneration = undefined;
+          if (project.kind === "temporary") await rm(project.path, { recursive: true, force: true });
+          return setup.hookFailure;
+        }
+        bindings = setup.bindings;
+        warnings = bindings.filter((binding) =>
+          typeof binding === "object" && binding !== null && !Array.isArray(binding) && binding.status === "error").length;
+        if (previous?.generation !== undefined) {
+          try { previousRelease = await this.leases.release(session, previous.generation) as unknown as JsonValue; }
+          catch (error) {
+            await this.leases.release(session, committed.lease.generation);
+            candidateGeneration = undefined;
+            throw error;
+          }
+        }
+      } else {
+        const hooks = await matchingHooks(project.path, this.projectOpenHooks);
+        hooksRun = hooks.length;
+        if (hooks.length === 0) await progress?.report("No project hooks configured; activating project…", 0.45);
+        const hookFailure = await runProjectHooks(project, hooks, this.processes, progress);
+        if (hookFailure !== undefined) return hookFailure;
+        if (this.projectBindings.length === 0) await progress?.report("No downstream project bindings; activating project…", 0.75);
+        bindings = await projectBindingResults(project.path, this.projectBindings, this.invokeBinding, progress);
+        warnings = bindings.filter((binding) =>
+          typeof binding === "object" && binding !== null && !Array.isArray(binding) && binding.status === "error").length;
+      }
+    } catch (error) {
+      if (this.leases !== undefined && candidateGeneration !== undefined) {
+        await (candidateCommitted
+          ? this.leases.release(session, candidateGeneration)
+          : this.leases.abort(session, candidateGeneration)).catch(() => undefined);
+      }
+      if (project.kind === "temporary" && this.activeProjects.get(session)?.path !== project.path) {
+        await rm(project.path, { recursive: true, force: true });
+      }
+      return leaseFailure("project.open", error);
     }
-    const bindings = await projectBindingResults(
-      project.path,
-      this.projectBindings,
-      this.invokeBinding,
-      progress,
-    );
-    const warnings = bindings.filter((binding) =>
-      typeof binding === "object" && binding !== null && !Array.isArray(binding) && binding.status === "error").length;
-    this.activeProject = project;
+    candidateGeneration = undefined;
+    this.activeProjects.set(session, project);
     if (project.kind === "temporary") this.temporaryProjects.add(project.path);
     await progress?.report(`Project ${basename(project.path)} is active`, 0.95);
     return success(
       "project.open",
-      { path: project.path, kind: project.kind, hooksRun: hooks.length, bindings, bindingWarnings: warnings },
-      `active=${project.path} kind=${project.kind}${bindings.length === 0 ? "" : ` bindings=${bindings.length - warnings}/${bindings.length}`}`,
+      { path: project.path, kind: project.kind, mode: project.mode, generation: project.generation ?? null, hooksRun, bindings, bindingWarnings: warnings, previousRelease },
+      `active=${project.path} kind=${project.kind} mode=${project.mode}${bindings.length === 0 ? "" : ` bindings=${bindings.length - warnings}/${bindings.length}`}`,
     );
   }
 
-  currentProject(): ToolCallResult {
+  currentProject(session = "runtime"): ToolCallResult {
+    const activeProject = this.activeProjects.get(session);
     return success(
       "project.current",
-      { path: this.activeProject?.path ?? null, kind: this.activeProject?.kind ?? null },
-      this.activeProject === null ? "no active project" : `active=${this.activeProject.path} kind=${this.activeProject.kind}`,
+      {
+        path: activeProject?.path ?? null,
+        kind: activeProject?.kind ?? null,
+        mode: activeProject?.mode ?? null,
+        generation: activeProject?.generation ?? null,
+      },
+      activeProject === undefined ? "no active project" : `active=${activeProject.path} kind=${activeProject.kind} mode=${activeProject.mode}`,
     );
+  }
+
+  private async withOperation<T>(session: string, project: ActiveProject, write: boolean, action: () => Promise<T>): Promise<T> {
+    if (this.leases === undefined || project.generation === undefined) return await action();
+    const operation = await this.leases.access(session, project.generation, write);
+    try { return await action(); }
+    finally { await this.leases.complete(session, project.generation, operation); }
+  }
+
+  private async clearBackgroundPin(snapshot: ProcessSnapshot): Promise<void> {
+    const pin = this.backgroundPin;
+    if (pin === undefined || snapshot.state === "running" || snapshot.pid !== pin.pid || this.leases === undefined) return;
+    try {
+      await this.leases.backgroundExited(pin.session, pin.generation, pin.operation, pin.pid);
+      this.backgroundPin = undefined;
+    } catch {
+      // Keep the pin so a later poll or stop can retry durable cleanup.
+    }
+  }
+
+  async guarded(
+    session: string,
+    tool: string,
+    write: boolean,
+    action: () => Promise<ToolCallResult>,
+  ): Promise<ToolCallResult> {
+    const project = this.activeProjects.get(session);
+    if (project === undefined) return failure(tool, "NO_ACTIVE_PROJECT", "Resolve a project before using this tool.");
+    try { return await this.withOperation(session, project, write, action); }
+    catch (error) { return leaseFailure(tool, error); }
+  }
+
+  async readProject(path: string, session = "runtime"): Promise<ToolCallResult> {
+    return await this.guarded(session, "project.read", false, async () => {
+      const project = this.activeProjects.get(session) as ActiveProject;
+      try {
+        const candidate = await projectEntry(project.path, path);
+        const info = await stat(candidate);
+        if (!info.isFile() || info.size > 1_048_576) return failure("project.read", "PROJECT_FILE_UNREADABLE", "The project file is not a readable bounded regular file.");
+        const text = await readFile(candidate, "utf8");
+        return success("project.read", { path, text }, `${text.length} characters`);
+      } catch (error) {
+        const code = error instanceof Error && /^[A-Z_]+$/u.test(error.message) ? error.message : "PROJECT_FILE_UNREADABLE";
+        return failure("project.read", code, "The requested project file could not be read.");
+      }
+    });
+  }
+
+  async listProject(path = ".", session = "runtime"): Promise<ToolCallResult> {
+    return await this.guarded(session, "project.files", false, async () => {
+      const project = this.activeProjects.get(session) as ActiveProject;
+      try {
+        const candidate = await projectEntry(project.path, path);
+        const entries = (await readdir(candidate, { withFileTypes: true }))
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .slice(0, 500)
+          .map((entry) => ({ name: entry.name, kind: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other" }));
+        return success("project.files", { path, entries }, `${entries.length} entries`);
+      } catch {
+        return failure("project.files", "PROJECT_DIRECTORY_UNREADABLE", "The requested project directory could not be read.");
+      }
+    });
+  }
+
+  async releaseProject(generation: string, session = "runtime"): Promise<ToolCallResult> {
+    if (this.leases === undefined) return failure("project.release", "LEASES_UNAVAILABLE", "Project leasing is not configured.");
+    const project = this.activeProjects.get(session);
+    if (project === undefined) return failure("project.release", "NO_ACTIVE_PROJECT", "The authenticated session has no active project lease.");
+    if (project.generation !== generation) {
+      return failure("project.release", "LEASE_GENERATION_MISMATCH", "The supplied generation does not match the authenticated session's active lease.", {
+        expected: project.generation ?? null,
+        actual: generation,
+      });
+    }
+    try {
+      const released = await this.leases.release(session, generation);
+      this.activeProjects.delete(session);
+      return success("project.release", released as unknown as JsonValue, `relinquished generation=${generation}`);
+    } catch (error) { return leaseFailure("project.release", error); }
+  }
+
+  async forceReleaseProject(path: string, generation: string, reason: string, session = "runtime"): Promise<ToolCallResult> {
+    if (this.leases === undefined) return failure("project.forceRelease", "LEASES_UNAVAILABLE", "Project leasing is not configured.");
+    try {
+      const released = await this.leases.forceRelease(session, path, generation, reason);
+      for (const [owner, project] of this.activeProjects) {
+        if (project.generation === generation) this.activeProjects.delete(owner);
+      }
+      return success("project.forceRelease", released as unknown as JsonValue, `relinquished generation=${generation}`);
+    } catch (error) { return leaseFailure("project.forceRelease", error); }
+  }
+
+  async handoffProject(id: string): Promise<ToolCallResult> {
+    if (this.leases === undefined) return failure("project.handoff", "LEASES_UNAVAILABLE", "Project leasing is not configured.");
+    try {
+      const handoff = await this.leases.handoff(id);
+      return success("project.handoff", handoff as unknown as JsonValue, handoff.released ? "independent acquisition verified" : "independent acquisition pending");
+    } catch (error) { return leaseFailure("project.handoff", error); }
   }
 
   async run(
@@ -318,14 +525,30 @@ export class CoreRuntime {
     cwd?: string,
     allowNonZero = false,
     progress?: ToolProgress,
+    session = "runtime",
   ): Promise<ToolCallResult> {
-    if (this.activeProject === null) return failure("dev.run", "NO_ACTIVE_PROJECT", "Resolve a project before running a command.");
+    const activeProject = this.activeProjects.get(session);
+    if (activeProject === undefined) return failure("dev.run", "NO_ACTIVE_PROJECT", "Resolve a project before running a command.");
     const label = commandLabel(argv);
     await progress?.report(background ? `Starting ${label} in the background…` : `Running ${label}…`, 0.1);
     const stopHeartbeat = background ? () => undefined : commandHeartbeat(progress, label);
+    let operation: string | undefined;
+    let backgroundStarted = false;
     try {
-      const resolvedCwd = await commandCwd(this.activeProject.path, cwd);
+      if (this.leases !== undefined && activeProject.generation !== undefined) {
+        operation = await this.leases.access(session, activeProject.generation, true);
+      }
+      const resolvedCwd = await commandCwd(activeProject.path, cwd);
       const result = await this.processes.run(argv, resolvedCwd, background, timeoutMs);
+      backgroundStarted = background;
+      if (background && operation !== undefined && this.leases !== undefined && activeProject.generation !== undefined) {
+        if (result.pid === null) throw new LeaseError("INVALID_BACKGROUND_IDENTITY");
+        await this.leases.complete(session, activeProject.generation, operation, [result.pid]);
+        this.backgroundPin = { session, generation: activeProject.generation, operation, pid: result.pid };
+        operation = undefined;
+        const exited = this.processes.backgroundExit();
+        if (exited !== undefined) void exited.then((snapshot) => this.clearBackgroundPin(snapshot));
+      }
       if (!background && result.exitCode !== 0 && !allowNonZero) {
         await progress?.report(`${label} exited with status ${result.exitCode}`, 0.9);
         return failure("dev.run", "COMMAND_EXIT_NONZERO", `Command exited with status ${result.exitCode}.`, processData(result));
@@ -336,6 +559,8 @@ export class CoreRuntime {
       );
       return success("dev.run", processData(result), background ? `started pid=${result.pid}` : `exit=${result.exitCode}`);
     } catch (error) {
+      if (backgroundStarted) await this.processes.stop().catch(() => undefined);
+      if (error instanceof LeaseError) return leaseFailure("dev.run", error);
       const code = error instanceof Error ? error.message : "COMMAND_FAILED";
       const snapshot = errorSnapshot(error);
       if (code === "COMMAND_TIMEOUT") {
@@ -358,6 +583,9 @@ export class CoreRuntime {
       await progress?.report(`${label} could not be started`, 0.9);
       return failure("dev.run", "COMMAND_FAILED", "Command could not be started.");
     } finally {
+      if (operation !== undefined && this.leases !== undefined && activeProject.generation !== undefined) {
+        await this.leases.complete(session, activeProject.generation, operation).catch(() => undefined);
+      }
       stopHeartbeat();
     }
   }
@@ -366,6 +594,7 @@ export class CoreRuntime {
     steps: BatchStep[],
     stopOnError: boolean,
     progress?: ToolProgress,
+    session = "runtime",
   ): Promise<ToolCallResult> {
     const results: JsonValue[] = [];
     let firstFailure: number | null = null;
@@ -384,6 +613,7 @@ export class CoreRuntime {
         step.cwd,
         step.allowNonZero === true,
         progress,
+        session,
       );
       const structured = command.structuredContent;
       results.push({
@@ -414,35 +644,53 @@ export class CoreRuntime {
     return success("dev.batch", { steps: results }, `${results.length} steps completed`);
   }
 
-  async poll(waitMs = 0): Promise<ToolCallResult> {
+  async poll(waitMs = 0, session = "runtime"): Promise<ToolCallResult> {
+    if (this.backgroundPin !== undefined && this.backgroundPin.session !== session) {
+      return failure("dev.poll", "BACKGROUND_NOT_OWNED", "The tracked background process belongs to another authenticated session.");
+    }
     const result = waitMs > 0 ? await this.processes.wait(waitMs) : this.processes.poll();
+    await this.clearBackgroundPin(result);
     return success("dev.poll", processData(result), `state=${result.state}`);
   }
 
-  async stop(progress?: ToolProgress): Promise<ToolCallResult> {
+  async stop(progress?: ToolProgress, session = "runtime"): Promise<ToolCallResult> {
+    if (this.backgroundPin !== undefined && this.backgroundPin.session !== session) {
+      return failure("dev.stop", "BACKGROUND_NOT_OWNED", "The tracked background process belongs to another authenticated session.");
+    }
     await progress?.report("Sending the background process a stop signal…", 0.25);
     const result = await this.processes.stop();
+    await this.clearBackgroundPin(result);
     await progress?.report(`Background process is ${result.state}`, 0.9);
     return success("dev.stop", processData(result), `state=${result.state}`);
   }
 
-  async diff(progress?: ToolProgress): Promise<ToolCallResult> {
-    if (this.activeProject === null) return failure("dev.diff", "NO_ACTIVE_PROJECT", "Resolve a project before viewing changes.");
-    await progress?.report("Reading Git working-tree changes…", 0.2);
-    const baseline = await beginWorkingTreeDiff(this.activeProject.path);
-    await progress?.report("Building the bounded project diff…", 0.6);
-    const result = await finishDiff(baseline);
-    await progress?.report(`Found ${result.summary.fileCount} changed files`, 0.9);
-    return success(
-      "dev.diff",
-      { changes: result.summary } as unknown as JsonValue,
-      `${result.summary.fileCount} changed files`,
-      result.details === undefined ? undefined : { localDevDiff: result.details },
-    );
+  async diff(progress?: ToolProgress, session = "runtime"): Promise<ToolCallResult> {
+    return await this.guarded(session, "dev.diff", false, async () => {
+      const activeProject = this.activeProjects.get(session) as ActiveProject;
+      await progress?.report("Reading Git working-tree changes…", 0.2);
+      const baseline = await beginWorkingTreeDiff(activeProject.path);
+      await progress?.report("Building the bounded project diff…", 0.6);
+      const result = await finishDiff(baseline);
+      await progress?.report(`Found ${result.summary.fileCount} changed files`, 0.9);
+      return success(
+        "dev.diff",
+        { changes: result.summary } as unknown as JsonValue,
+        `${result.summary.fileCount} changed files`,
+        result.details === undefined ? undefined : { localDevDiff: result.details },
+      );
+    });
   }
 
   async close(): Promise<void> {
     await this.processes.close();
+    await this.clearBackgroundPin(this.processes.poll());
+    if (this.leases !== undefined) {
+      await Promise.allSettled([...this.activeProjects].map(async ([session, project]) => {
+        if (project.generation !== undefined) await this.leases?.release(session, project.generation);
+      }));
+      this.activeProjects.clear();
+      await this.leases.close();
+    }
     await Promise.allSettled([...this.temporaryProjects].map((path) => rm(path, { recursive: true, force: true })));
     this.temporaryProjects.clear();
   }

@@ -142,6 +142,18 @@ test("pending leases cannot authorize work or mint receipts; commit is single-us
   assert.equal((await a.call("commit", { generation })).code, "LEASE_ALREADY_COMMITTED");
 });
 
+test("a pending generation cannot be used as the previous binding", async t => {
+  const f = await fixture(t), a = await f.client("worker");
+  const pending = await a.call("reserve", { path: f.source, options: { mode: "write" } });
+  assert.equal(pending.ok, true);
+  const next = await a.call("reserve", {
+    path: f.evidence,
+    options: { mode: "read" },
+    previous: pending.value.generation,
+  });
+  assert.equal(next.code, "PREVIOUS_LEASE_NOT_COMMITTED");
+});
+
 test("handoff reservation predates commit and demands an independent runtime", async t => {
   const f = await fixture(t), a = await f.client("worker"), b = await f.client("reviewer");
   const original = await open(a, f.source);

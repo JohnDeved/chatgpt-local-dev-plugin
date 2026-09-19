@@ -150,6 +150,11 @@ export class ProcessManager {
 
   poll(): ProcessSnapshot { return snapshot(this.background); }
 
+  backgroundExit(): Promise<ProcessSnapshot> | undefined {
+    const tracked = this.background;
+    return tracked === undefined ? undefined : tracked.exited.then(() => snapshot(tracked));
+  }
+
   async wait(waitMs: number): Promise<ProcessSnapshot> {
     const tracked = this.background;
     if (tracked === undefined || tracked.finishedAt !== null || waitMs <= 0) return snapshot(tracked);

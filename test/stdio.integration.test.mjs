@@ -120,6 +120,11 @@ test("production stdio server exposes tool-only native tools with ChatGPT status
     assert.deepEqual(listed.result.tools.map(({ name }) => name), [
       "project.open",
       "project.current",
+      "project.read",
+      "project.files",
+      "project.release",
+      "project.forceRelease",
+      "project.handoff",
       "dev.run",
       "dev.batch",
       "dev.poll",
