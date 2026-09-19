@@ -286,6 +286,49 @@ test("shutdown waits for foreground operation completion before releasing the le
   await successor.close();
 });
 
+test("shutdown waits for project-open hook completion before closing the provider", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-hook-close-race-")));
+  const source = join(home, "projects/source");
+  const registry = join(home, "registry");
+  await mkdir(source, { recursive: true });
+  const leases = new ProjectLeases(registry);
+  const hooks = [{ projectRoot: source, argv: [process.execPath, "-e", "process.exit(0)"] }];
+  const runtime = new CoreRuntime([join(home, "projects")], hooks, [], undefined, leases);
+  t.after(async () => {
+    await runtime.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const originalComplete = leases.complete.bind(leases);
+  let completionEntered;
+  const entered = new Promise(resolve => { completionEntered = resolve; });
+  let allowCompletion;
+  const completionGate = new Promise(resolve => { allowCompletion = resolve; });
+  leases.complete = async (...args) => {
+    if (!Array.isArray(args[3]) || args[3].length === 0) {
+      completionEntered();
+      await completionGate;
+    }
+    return await originalComplete(...args);
+  };
+
+  const opening = runtime.openProject(source, "error", undefined, "worker", { mode: "write" });
+  await entered;
+  let closed = false;
+  const closing = runtime.close().then(() => { closed = true; });
+  await delay(50);
+  assert.equal(closed, false);
+  allowCompletion();
+  assert.equal((await opening).structuredContent.ok, true);
+  await closing;
+  assert.equal(closed, true);
+
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  const acquired = await successor.openProject(source, "error", undefined, "successor", { mode: "write" });
+  assert.equal(acquired.structuredContent.ok, true, JSON.stringify(acquired.structuredContent));
+  await successor.close();
+});
+
 test("shutdown waits for pre-pin background registration before releasing the lease", { timeout: 30000 }, async t => {
   const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-shutdown-race-")));
   const source = join(home, "projects/source");

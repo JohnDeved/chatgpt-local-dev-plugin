@@ -342,6 +342,19 @@ export class CoreRuntime {
     }
   }
 
+  private trackRuntimeTask(): () => void {
+    let release: () => void = () => undefined;
+    const task = new Promise<void>((resolve) => { release = resolve; });
+    this.runningTasks.add(task);
+    let settled = false;
+    return () => {
+      if (settled) return;
+      settled = true;
+      release();
+      this.runningTasks.delete(task);
+    };
+  }
+
   private bindingsForTool(tool: string): ProjectBinding[] {
     return this.projectBindings.filter((binding) => tool.startsWith(`${binding.server}.`));
   }
@@ -356,26 +369,30 @@ export class CoreRuntime {
     write: boolean,
     action: () => Promise<McpCallToolResult>,
   ): Promise<McpCallToolResult | ToolCallResult> {
+    if (this.closing) return failure(tool, "RUNTIME_CLOSING", "The runtime is closing and cannot start new work.");
     const project = this.activeProjects.get(session);
     if (project === undefined) return failure(tool, "NO_ACTIVE_PROJECT", "Resolve a project before using this tool.");
     const bindings = this.bindingsForTool(tool);
     if (bindings.some((binding) => `${binding.server}.${binding.tool}` === tool)) {
       return failure(tool, "PROJECT_BINDING_MANAGED", "Configured project binding tools are managed by Local Dev.");
     }
+    const finish = this.trackRuntimeTask();
     try {
-      return await this.withOperation(session, project, write, async () => await this.serializeDownstream(async () => {
-        const results = await projectBindingResults(project.path, bindings, this.invokeBinding);
-        if (results.some((result) => typeof result === "object" && result !== null && !Array.isArray(result) && result.status === "error")) {
-          return failure(tool, "PROJECT_BINDING_FAILED", "The downstream server could not be bound to the authenticated project.");
+      try {
+        return await this.withOperation(session, project, write, async () => await this.serializeDownstream(async () => {
+          const results = await projectBindingResults(project.path, bindings, this.invokeBinding);
+          if (results.some((result) => typeof result === "object" && result !== null && !Array.isArray(result) && result.status === "error")) {
+            return failure(tool, "PROJECT_BINDING_FAILED", "The downstream server could not be bound to the authenticated project.");
+          }
+          return await action();
+        }));
+      } catch (error) {
+        if (error instanceof LeaseError && error.code === "PROJECT_BINDING_REVOKED" && this.activeProjects.get(session)?.generation === project.generation) {
+          this.activeProjects.delete(session);
         }
-        return await action();
-      }));
-    } catch (error) {
-      if (error instanceof LeaseError && error.code === "PROJECT_BINDING_REVOKED" && this.activeProjects.get(session)?.generation === project.generation) {
-        this.activeProjects.delete(session);
+        return leaseFailure(tool, error);
       }
-      return leaseFailure(tool, error);
-    }
+    } finally { finish(); }
   }
 
   async openProject(
@@ -386,7 +403,9 @@ export class CoreRuntime {
     options: OpenLeaseOptions = { mode: "write" },
   ): Promise<ToolCallResult> {
     if (this.closing) return failure("project.open", "RUNTIME_CLOSING", "The runtime is closing and cannot open a project.");
-    return await this.serializeProject(session, async () => await this.openProjectTransition(query, onMissing, progress, session, options));
+    const finish = this.trackRuntimeTask();
+    try { return await this.serializeProject(session, async () => await this.openProjectTransition(query, onMissing, progress, session, options)); }
+    finally { finish(); }
   }
 
   private async openProjectTransition(
@@ -583,15 +602,19 @@ export class CoreRuntime {
     write: boolean,
     action: () => Promise<ToolCallResult>,
   ): Promise<ToolCallResult> {
+    if (this.closing) return failure(tool, "RUNTIME_CLOSING", "The runtime is closing and cannot start new work.");
     const project = this.activeProjects.get(session);
     if (project === undefined) return failure(tool, "NO_ACTIVE_PROJECT", "Resolve a project before using this tool.");
-    try { return await this.withOperation(session, project, write, action); }
-    catch (error) {
-      if (error instanceof LeaseError && error.code === "PROJECT_BINDING_REVOKED" && this.activeProjects.get(session)?.generation === project.generation) {
-        this.activeProjects.delete(session);
+    const finish = this.trackRuntimeTask();
+    try {
+      try { return await this.withOperation(session, project, write, action); }
+      catch (error) {
+        if (error instanceof LeaseError && error.code === "PROJECT_BINDING_REVOKED" && this.activeProjects.get(session)?.generation === project.generation) {
+          this.activeProjects.delete(session);
+        }
+        return leaseFailure(tool, error);
       }
-      return leaseFailure(tool, error);
-    }
+    } finally { finish(); }
   }
 
   async readProject(path: string, session = "runtime"): Promise<ToolCallResult> {
@@ -627,6 +650,7 @@ export class CoreRuntime {
   }
 
   async releaseProject(generation: string, session = "runtime"): Promise<ToolCallResult> {
+    if (this.closing) return failure("project.release", "RUNTIME_CLOSING", "The runtime is closing and cannot start new work.");
     if (this.leases === undefined) return failure("project.release", "LEASES_UNAVAILABLE", "Project leasing is not configured.");
     const project = this.activeProjects.get(session);
     if (project === undefined) return failure("project.release", "NO_ACTIVE_PROJECT", "The authenticated session has no active project lease.");
@@ -636,30 +660,41 @@ export class CoreRuntime {
         actual: generation,
       });
     }
+    const finish = this.trackRuntimeTask();
     try {
-      const released = await this.leases.release(session, generation);
-      this.activeProjects.delete(session);
-      return success("project.release", released as unknown as JsonValue, `relinquished generation=${generation}`);
-    } catch (error) { return leaseFailure("project.release", error); }
+      try {
+        const released = await this.leases.release(session, generation);
+        this.activeProjects.delete(session);
+        return success("project.release", released as unknown as JsonValue, `relinquished generation=${generation}`);
+      } catch (error) { return leaseFailure("project.release", error); }
+    } finally { finish(); }
   }
 
   async forceReleaseProject(path: string, generation: string, reason: string, session = "runtime"): Promise<ToolCallResult> {
+    if (this.closing) return failure("project.forceRelease", "RUNTIME_CLOSING", "The runtime is closing and cannot start new work.");
     if (this.leases === undefined) return failure("project.forceRelease", "LEASES_UNAVAILABLE", "Project leasing is not configured.");
+    const finish = this.trackRuntimeTask();
     try {
-      const released = await this.leases.forceRelease(session, path, generation, reason);
-      for (const [owner, project] of this.activeProjects) {
-        if (project.generation === generation) this.activeProjects.delete(owner);
-      }
-      return success("project.forceRelease", released as unknown as JsonValue, `relinquished generation=${generation}`);
-    } catch (error) { return leaseFailure("project.forceRelease", error); }
+      try {
+        const released = await this.leases.forceRelease(session, path, generation, reason);
+        for (const [owner, project] of this.activeProjects) {
+          if (project.generation === generation) this.activeProjects.delete(owner);
+        }
+        return success("project.forceRelease", released as unknown as JsonValue, `relinquished generation=${generation}`);
+      } catch (error) { return leaseFailure("project.forceRelease", error); }
+    } finally { finish(); }
   }
 
   async handoffProject(id: string): Promise<ToolCallResult> {
+    if (this.closing) return failure("project.handoff", "RUNTIME_CLOSING", "The runtime is closing and cannot start new work.");
     if (this.leases === undefined) return failure("project.handoff", "LEASES_UNAVAILABLE", "Project leasing is not configured.");
+    const finish = this.trackRuntimeTask();
     try {
-      const handoff = await this.leases.handoff(id);
-      return success("project.handoff", handoff as unknown as JsonValue, handoff.released ? "independent acquisition verified" : "independent acquisition pending");
-    } catch (error) { return leaseFailure("project.handoff", error); }
+      try {
+        const handoff = await this.leases.handoff(id);
+        return success("project.handoff", handoff as unknown as JsonValue, handoff.released ? "independent acquisition verified" : "independent acquisition pending");
+      } catch (error) { return leaseFailure("project.handoff", error); }
+    } finally { finish(); }
   }
 
   async run(
@@ -680,9 +715,7 @@ export class CoreRuntime {
       if (typeof claimed !== "number") return claimed;
       backgroundToken = claimed;
     }
-    let settleRun: () => void = () => undefined;
-    const runningTask = new Promise<void>((resolve) => { settleRun = resolve; });
-    this.runningTasks.add(runningTask);
+    const finish = this.trackRuntimeTask();
     const label = commandLabel(argv);
     const stopHeartbeat = background ? () => undefined : commandHeartbeat(progress, label);
     let operation: string | undefined;
@@ -764,8 +797,7 @@ export class CoreRuntime {
         }
         ownership.settle();
       }
-      settleRun();
-      this.runningTasks.delete(runningTask);
+      finish();
       stopHeartbeat();
     }
   }
