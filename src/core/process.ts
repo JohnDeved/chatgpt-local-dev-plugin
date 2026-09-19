@@ -85,7 +85,10 @@ function start(argv: string[], cwd: string, background: boolean): TrackedProcess
   child.on("spawn", () => resolveStarted(true));
   child.on("close", (code, signal) => {
     tracked.exitCode = code; tracked.signal = signal;
-    tracked.finishedAt = new Date().toISOString(); resolveExit();
+    void terminateCommand(child).then((confirmed) => {
+      if (confirmed) tracked.finishedAt = new Date().toISOString();
+      resolveExit();
+    }, () => resolveExit());
   });
   return tracked;
 }
@@ -99,6 +102,7 @@ function validateArgv(argv: string[]): void {
 
 export class ProcessManager {
   private background: TrackedProcess | undefined;
+  private closing = false;
   private readonly foreground = new Set<TrackedProcess>();
 
   hasRunningBackground(): boolean {
@@ -106,6 +110,7 @@ export class ProcessManager {
   }
 
   async run(argv: string[], cwd: string, background: boolean, timeoutMs?: number): Promise<ProcessSnapshot> {
+    if (this.closing) throw new Error("RUNTIME_CLOSING");
     validateArgv(argv);
     const signal = currentActivity()?.signal;
     signal?.throwIfAborted();
@@ -181,7 +186,8 @@ export class ProcessManager {
   async stop(): Promise<ProcessSnapshot> {
     const tracked = this.background;
     if (tracked === undefined) return snapshot(undefined);
-    await terminateCommand(tracked.child);
+    const confirmed = await terminateCommand(tracked.child);
+    if (confirmed && tracked.finishedAt === null) tracked.finishedAt = new Date().toISOString();
     return snapshot(tracked);
   }
 
@@ -193,6 +199,7 @@ export class ProcessManager {
   }
 
   async close(): Promise<ProcessSnapshot> {
+    this.closing = true;
     await Promise.allSettled([...this.foreground].map((tracked) => terminateCommand(tracked.child)));
     return await this.stop();
   }

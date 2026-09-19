@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
+import { CoreRuntime } from "../dist/core/runtime.js";
+import { ProjectLeases } from "../dist/project-leases.js";
 
 async function environment(t, options = {}) {
   const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-reader-leases-")));
@@ -155,17 +157,45 @@ test("background work pins its generation and retained snapshot to one session",
   await a.ready("peer");
   const lease = await a.call("worker", "project.open", { query: f.source, mode: "write" });
   assert.equal(lease.ok, true);
+  const childPidFile = join(f.source, "child.pid");
+  const childScript = `require("node:fs").writeFileSync(${JSON.stringify(childPidFile)}, String(process.pid));setInterval(() => {}, 1000)`;
+  const leaderScript = `const {spawn}=require("node:child_process");const child=spawn(process.execPath,["-e",${JSON.stringify(childScript)}],{stdio:"ignore"});child.unref();setTimeout(() => process.exit(0), 500)`;
   const starting = a.call("worker", "dev.run", {
-    argv: [process.execPath, "-e", "setTimeout(() => process.exit(0), 1000)"],
+    argv: [process.execPath, "-e", leaderScript],
     background: true,
   });
   assert.equal((await a.call("peer", "dev.stop")).error.code, "BACKGROUND_NOT_OWNED");
   assert.equal((await starting).ok, true);
   assert.equal((await a.call("worker", "project.release", { generation: lease.data.generation })).error.code, "PROJECT_HAS_ACTIVE_WORK");
-  await delay(1200);
+  await delay(700);
   assert.equal((await a.call("peer", "dev.poll")).error.code, "BACKGROUND_NOT_OWNED");
   assert.equal((await a.call("worker", "dev.poll", { waitMs: 5000 })).data.state, "exited");
+  const childPid = Number(await readFile(childPidFile, "utf8"));
+  assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
   assert.equal((await a.call("worker", "project.release", { generation: lease.data.generation })).ok, true);
+});
+
+test("concurrent replacement claims cannot stop the winning background process", { timeout: 30000 }, async t => {
+  const f = await environment(t), a = await f.client("multiplex");
+  await a.ready("one"); await a.ready("two");
+  assert.equal((await a.call("one", "project.open", { query: f.source, mode: "write" })).ok, true);
+  assert.equal((await a.call("two", "project.open", { query: f.evidence, mode: "write" })).ok, true);
+  assert.equal((await a.call("one", "dev.run", {
+    argv: [process.execPath, "-e", "setTimeout(() => process.exit(0), 100)"],
+    background: true,
+  })).ok, true);
+  await delay(300);
+  const starts = await Promise.all([
+    a.call("one", "dev.run", { argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"], background: true }),
+    a.call("two", "dev.run", { argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"], background: true }),
+  ]);
+  const winners = starts.map((value, index) => ({ value, session: index === 0 ? "one" : "two" })).filter(entry => entry.value.ok);
+  assert.equal(winners.length, 1, JSON.stringify(starts));
+  const loser = starts.find(value => !value.ok);
+  assert.ok(["BACKGROUND_BUSY", "BACKGROUND_NOT_OWNED"].includes(loser.error.code), JSON.stringify(loser));
+  const winner = winners[0];
+  assert.equal((await a.call(winner.session, "dev.poll")).data.state, "running");
+  assert.equal((await a.call(winner.session, "dev.stop")).data.state, "exited");
 });
 
 test("same-path reopen revalidates explicit lease constraints", { timeout: 30000 }, async t => {
@@ -182,6 +212,50 @@ test("same-path reopen revalidates explicit lease constraints", { timeout: 30000
     expectedHead: "0000000000000000000000000000000000000000",
   })).error.code, "PROJECT_HEAD_MISMATCH");
   assert.equal((await a.call("worker", "project.current")).data.generation, renewed.data.generation);
+});
+
+test("shutdown waits for pre-pin background registration before releasing the lease", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-shutdown-race-")));
+  const source = join(home, "projects/source");
+  const registry = join(home, "registry");
+  await mkdir(source, { recursive: true });
+  const leases = new ProjectLeases(registry);
+  const runtime = new CoreRuntime([join(home, "projects")], [], [], undefined, leases);
+  t.after(async () => {
+    await runtime.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+  const opened = await runtime.openProject(source, "error", undefined, "worker", { mode: "write" });
+  assert.equal(opened.structuredContent.ok, true, JSON.stringify(opened.structuredContent));
+
+  const originalComplete = leases.complete.bind(leases);
+  let registerEntered;
+  const entered = new Promise(resolve => { registerEntered = resolve; });
+  let allowRegister;
+  const registrationGate = new Promise(resolve => { allowRegister = resolve; });
+  leases.complete = async (...args) => {
+    if (Array.isArray(args[3]) && args[3].length > 0) {
+      registerEntered();
+      await registrationGate;
+    }
+    return await originalComplete(...args);
+  };
+
+  const starting = runtime.run([process.execPath, "-e", "setInterval(() => {}, 1000)"], true, undefined, undefined, false, undefined, "worker");
+  await entered;
+  let closed = false;
+  const closing = runtime.close().then(() => { closed = true; });
+  await delay(50);
+  assert.equal(closed, false);
+  allowRegister();
+  assert.equal((await starting).structuredContent.ok, true);
+  await closing;
+  assert.equal(closed, true);
+
+  const successor = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  const acquired = await successor.openProject(source, "error", undefined, "successor", { mode: "write" });
+  assert.equal(acquired.structuredContent.ok, true, JSON.stringify(acquired.structuredContent));
+  await successor.close();
 });
 
 test("cooperative shutdown clears a confirmed-stopped background lease", { timeout: 30000 }, async t => {

@@ -280,13 +280,25 @@ function commandHeartbeat(progress: ToolProgress | undefined, label: string): ()
   return () => clearInterval(timer);
 }
 
+interface BackgroundOwnership {
+  session: string;
+  token: number;
+  starting: boolean;
+  settled: Promise<void>;
+  settle: () => void;
+}
+
 export class CoreRuntime {
   private readonly activeProjects = new Map<string, ActiveProject>();
   private readonly processes = new ProcessManager();
   private readonly temporaryProjects = new Set<string>();
-  private backgroundOwner: string | undefined;
+  private backgroundOwnership: BackgroundOwnership | undefined;
   private backgroundPin: { session: string; generation: string; operation: string; pid: number } | undefined;
   private backgroundCleanup: Promise<void> | undefined;
+  private backgroundQueue: Promise<void> = Promise.resolve();
+  private backgroundSequence = 0;
+  private closing = false;
+  private closeTask: Promise<void> | undefined;
   private downstreamQueue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -296,6 +308,15 @@ export class CoreRuntime {
     private readonly invokeBinding?: ProjectBindingInvoker,
     private readonly leases?: ProjectLeases,
   ) {}
+
+  private async serializeBackground<T>(action: () => Promise<T>): Promise<T> {
+    const previous = this.backgroundQueue;
+    let release: () => void = () => undefined;
+    this.backgroundQueue = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await action(); }
+    finally { release(); }
+  }
 
   private async serializeDownstream<T>(action: () => Promise<T>): Promise<T> {
     const previous = this.downstreamQueue;
@@ -349,6 +370,7 @@ export class CoreRuntime {
     session = "runtime",
     options: OpenLeaseOptions = { mode: "write" },
   ): Promise<ToolCallResult> {
+    if (this.closing) return failure("project.open", "RUNTIME_CLOSING", "The runtime is closing and cannot open a project.");
     if (this.processes.hasRunningBackground()) {
       return failure("project.open", "BACKGROUND_RUNNING", "Stop the background process before switching projects.");
     }
@@ -498,24 +520,35 @@ export class CoreRuntime {
     }
   }
 
-  private async claimBackground(session: string): Promise<ToolCallResult | undefined> {
-    const snapshot = this.processes.poll();
-    if (snapshot.state === "running") {
-      return failure("dev.run", this.backgroundOwner === session ? "BACKGROUND_BUSY" : "BACKGROUND_NOT_OWNED", this.backgroundOwner === session
-        ? "Only one background process may run at a time."
-        : "The tracked background process belongs to another authenticated session.");
-    }
-    if (snapshot.state === "exited") {
-      try { await this.clearBackgroundPin(snapshot); }
-      catch (error) { return leaseFailure("dev.run", error); }
-      if (this.backgroundPin !== undefined) return failure("dev.run", "BACKGROUND_CLEANUP_PENDING", "The previous background operation has not completed durable cleanup.");
-      this.processes.discardBackground(snapshot.pid);
-      this.backgroundOwner = undefined;
-    } else if (this.backgroundOwner !== undefined) {
-      return failure("dev.run", "BACKGROUND_BUSY", "A background start is already in progress.");
-    }
-    this.backgroundOwner = session;
-    return undefined;
+  private async claimBackground(session: string): Promise<number | ToolCallResult> {
+    return await this.serializeBackground(async () => {
+      if (this.closing) return failure("dev.run", "RUNTIME_CLOSING", "The runtime is closing and cannot start new work.");
+      const snapshot = this.processes.poll();
+      const ownership = this.backgroundOwnership;
+      if (snapshot.state === "running") {
+        return failure("dev.run", ownership?.session === session ? "BACKGROUND_BUSY" : "BACKGROUND_NOT_OWNED", ownership?.session === session
+          ? "Only one background process may run at a time."
+          : "The tracked background process belongs to another authenticated session.");
+      }
+      if (ownership?.starting === true) {
+        return failure("dev.run", "BACKGROUND_BUSY", "A background start is already in progress.");
+      }
+      if (snapshot.state === "exited") {
+        try { await this.clearBackgroundPin(snapshot); }
+        catch (error) { return leaseFailure("dev.run", error); }
+        if (this.backgroundPin !== undefined) return failure("dev.run", "BACKGROUND_CLEANUP_PENDING", "The previous background operation has not completed durable cleanup.");
+        this.processes.discardBackground(snapshot.pid);
+        this.backgroundOwnership = undefined;
+      } else if (ownership !== undefined) {
+        return failure("dev.run", "BACKGROUND_BUSY", "A background transition is already in progress.");
+      }
+      if (this.closing) return failure("dev.run", "RUNTIME_CLOSING", "The runtime is closing and cannot start new work.");
+      const token = ++this.backgroundSequence;
+      let settle: () => void = () => undefined;
+      const settled = new Promise<void>((resolve) => { settle = resolve; });
+      this.backgroundOwnership = { session, token, starting: true, settled, settle };
+      return token;
+    });
   }
 
   async guarded(
@@ -612,13 +645,14 @@ export class CoreRuntime {
     progress?: ToolProgress,
     session = "runtime",
   ): Promise<ToolCallResult> {
+    if (this.closing) return failure("dev.run", "RUNTIME_CLOSING", "The runtime is closing and cannot start new work.");
     const activeProject = this.activeProjects.get(session);
     if (activeProject === undefined) return failure("dev.run", "NO_ACTIVE_PROJECT", "Resolve a project before running a command.");
-    let backgroundClaimed = false;
+    let backgroundToken: number | undefined;
     if (background) {
-      const blocked = await this.claimBackground(session);
-      if (blocked !== undefined) return blocked;
-      backgroundClaimed = true;
+      const claimed = await this.claimBackground(session);
+      if (typeof claimed !== "number") return claimed;
+      backgroundToken = claimed;
     }
     const label = commandLabel(argv);
     await progress?.report(background ? `Starting ${label} in the background…` : `Running ${label}…`, 0.1);
@@ -630,6 +664,7 @@ export class CoreRuntime {
         operation = await this.leases.access(session, activeProject.generation, true);
       }
       const resolvedCwd = await commandCwd(activeProject.path, cwd);
+      if (this.closing) throw new Error("RUNTIME_CLOSING");
       const result = await this.processes.run(argv, resolvedCwd, background, timeoutMs);
       if (background && operation !== undefined && this.leases !== undefined && activeProject.generation !== undefined) {
         if (result.pid === null) throw new LeaseError("INVALID_BACKGROUND_IDENTITY");
@@ -666,6 +701,7 @@ export class CoreRuntime {
         return failure("dev.run", code, code === "OPERATION_CANCELLED" ? "Command was cancelled." : "Termination could not be confirmed; inspect local process controls.", snapshot === undefined ? null : processData(snapshot));
       }
       if (code === "STEERING_PENDING") return failure("dev.run", code, "New local user steering must be acknowledged before starting another command.");
+      if (code === "RUNTIME_CLOSING") return failure("dev.run", code, "The runtime is closing and cannot start new work.");
       if (code === "BACKGROUND_BUSY") return failure("dev.run", code, "Only one background process may run at a time.");
       if (code === "INVALID_ARGV") return failure("dev.run", code, "argv must contain a command and non-empty arguments.");
       if (code === "INVALID_SHELL") return failure("dev.run", code, "Shell evaluation flags are not allowed; pass the executable and arguments directly.");
@@ -673,15 +709,31 @@ export class CoreRuntime {
       await progress?.report(`${label} could not be started`, 0.9);
       return failure("dev.run", "COMMAND_FAILED", "Command could not be started.");
     } finally {
-      const abandoned = backgroundClaimed && !backgroundRetained
+      const ownership = backgroundToken === undefined ? undefined : this.backgroundOwnership;
+      const ownsBackground = ownership?.token === backgroundToken;
+      const abandoned = ownsBackground && !backgroundRetained
         ? await this.processes.stop().catch(() => this.processes.poll())
         : undefined;
+      if (abandoned?.state === "running" && operation !== undefined && this.leases !== undefined && activeProject.generation !== undefined && abandoned.pid !== null) {
+        const generation = activeProject.generation;
+        const retainedOperation = operation;
+        const pid = abandoned.pid;
+        await this.leases.complete(session, generation, retainedOperation, [pid]).then(() => {
+          this.backgroundPin = { session, generation, operation: retainedOperation, pid };
+          operation = undefined;
+          backgroundRetained = true;
+        }).catch(() => undefined);
+      }
       if (operation !== undefined && this.leases !== undefined && activeProject.generation !== undefined) {
         await this.leases.complete(session, activeProject.generation, operation).catch(() => undefined);
       }
-      if (abandoned !== undefined && abandoned.state !== "running") {
-        this.processes.discardBackground(abandoned.pid);
-        this.backgroundOwner = undefined;
+      if (ownsBackground && ownership !== undefined) {
+        ownership.starting = false;
+        if (!backgroundRetained && abandoned !== undefined && abandoned.state !== "running") {
+          this.processes.discardBackground(abandoned.pid);
+          if (this.backgroundOwnership === ownership) this.backgroundOwnership = undefined;
+        }
+        ownership.settle();
       }
       stopHeartbeat();
     }
@@ -742,8 +794,12 @@ export class CoreRuntime {
   }
 
   async poll(waitMs = 0, session = "runtime"): Promise<ToolCallResult> {
-    if (this.backgroundOwner !== undefined && this.backgroundOwner !== session) {
+    const ownership = this.backgroundOwnership;
+    if (ownership !== undefined && ownership.session !== session) {
       return failure("dev.poll", "BACKGROUND_NOT_OWNED", "The tracked background process belongs to another authenticated session.");
+    }
+    if (ownership?.starting === true) {
+      return failure("dev.poll", "BACKGROUND_STARTING", "The background process is still being registered.");
     }
     const result = waitMs > 0 ? await this.processes.wait(waitMs) : this.processes.poll();
     try { await this.clearBackgroundPin(result); }
@@ -752,19 +808,25 @@ export class CoreRuntime {
   }
 
   async stop(progress?: ToolProgress, session = "runtime"): Promise<ToolCallResult> {
-    if (this.backgroundOwner !== undefined && this.backgroundOwner !== session) {
-      return failure("dev.stop", "BACKGROUND_NOT_OWNED", "The tracked background process belongs to another authenticated session.");
-    }
-    await progress?.report("Sending the background process a stop signal…", 0.25);
-    const result = await this.processes.stop();
-    try { await this.clearBackgroundPin(result); }
-    catch (error) { return leaseFailure("dev.stop", error); }
-    if (result.state !== "running") {
-      this.processes.discardBackground(result.pid);
-      this.backgroundOwner = undefined;
-    }
-    await progress?.report(`Background process is ${result.state}`, 0.9);
-    return success("dev.stop", processData(result), `state=${result.state}`);
+    return await this.serializeBackground(async () => {
+      const ownership = this.backgroundOwnership;
+      if (ownership !== undefined && ownership.session !== session) {
+        return failure("dev.stop", "BACKGROUND_NOT_OWNED", "The tracked background process belongs to another authenticated session.");
+      }
+      if (ownership?.starting === true) {
+        return failure("dev.stop", "BACKGROUND_STARTING", "The background process is still being registered.");
+      }
+      await progress?.report("Sending the background process a stop signal…", 0.25);
+      const result = await this.processes.stop();
+      try { await this.clearBackgroundPin(result); }
+      catch (error) { return leaseFailure("dev.stop", error); }
+      if (result.state !== "running") {
+        this.processes.discardBackground(result.pid);
+        if (this.backgroundOwnership === ownership) this.backgroundOwnership = undefined;
+      }
+      await progress?.report(`Background process is ${result.state}`, 0.9);
+      return success("dev.stop", processData(result), `state=${result.state}`);
+    });
   }
 
   async diff(progress?: ToolProgress, session = "runtime"): Promise<ToolCallResult> {
@@ -785,20 +847,28 @@ export class CoreRuntime {
   }
 
   async close(): Promise<void> {
-    const background = await this.processes.close();
-    await this.clearBackgroundPin(background);
-    if (background.state !== "running") {
-      this.processes.discardBackground(background.pid);
-      this.backgroundOwner = undefined;
-    }
-    if (this.leases !== undefined) {
-      await Promise.allSettled([...this.activeProjects].map(async ([session, project]) => {
-        if (project.generation !== undefined) await this.leases?.release(session, project.generation);
-      }));
-      this.activeProjects.clear();
-      await this.leases.close();
-    }
-    await Promise.allSettled([...this.temporaryProjects].map((path) => rm(path, { recursive: true, force: true })));
-    this.temporaryProjects.clear();
+    if (this.closeTask !== undefined) return await this.closeTask;
+    this.closing = true;
+    const closeTask = this.serializeBackground(async () => {
+      const ownership = this.backgroundOwnership;
+      if (ownership?.starting === true) await ownership.settled;
+      const background = await this.processes.close();
+      await this.clearBackgroundPin(background);
+      if (background.state !== "running") {
+        this.processes.discardBackground(background.pid);
+        this.backgroundOwnership = undefined;
+      }
+      if (this.leases !== undefined) {
+        await Promise.all([...this.activeProjects].map(async ([session, project]) => {
+          if (project.generation !== undefined) await this.leases?.release(session, project.generation);
+        }));
+        this.activeProjects.clear();
+        await this.leases.close();
+      }
+      await Promise.all([...this.temporaryProjects].map((path) => rm(path, { recursive: true, force: true })));
+      this.temporaryProjects.clear();
+    });
+    this.closeTask = closeTask;
+    return await closeTask;
   }
 }
