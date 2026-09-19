@@ -522,3 +522,35 @@ test("failed project setup preserves the previous authenticated binding", { time
   assert.equal((await a.call("worker", "project.current")).data.path, f.source);
   assert.equal((await b.call("peer", "project.open", { query: f.source, mode: "write" })).error.code, "PROJECT_IN_USE");
 });
+
+test("shutdown accepts an independently force-released generation", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-force-release-close-")));
+  const source = join(home, "projects/source"), registry = join(home, "registry");
+  await mkdir(source, { recursive: true });
+  const ownerLeases = new ProjectLeases(registry);
+  const owner = new CoreRuntime([join(home, "projects")], [], [], undefined, ownerLeases);
+  const reclaimer = new CoreRuntime([join(home, "projects")], [], [], undefined, new ProjectLeases(registry));
+  t.after(async () => {
+    await owner.close().catch(() => undefined);
+    await reclaimer.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const opened = await owner.openProject(source, "error", undefined, "owner", { mode: "read", leaseMs: 1000 });
+  assert.equal(opened.structuredContent.ok, true, JSON.stringify(opened.structuredContent));
+  const generation = opened.structuredContent.data.generation;
+  await delay(1100);
+  const forced = await reclaimer.forceReleaseProject(source, generation, "reclaim exact expired generation", "reclaimer");
+  assert.equal(forced.structuredContent.ok, true, JSON.stringify(forced.structuredContent));
+
+  const originalRelease = ownerLeases.release.bind(ownerLeases);
+  let failWithGenericError = true;
+  ownerLeases.release = async (...args) => {
+    if (failWithGenericError) { failWithGenericError = false; throw new Error("PROJECT_BINDING_REVOKED"); }
+    return await originalRelease(...args);
+  };
+  await assert.rejects(owner.close(), error => error?.constructor === Error && error.message === "PROJECT_BINDING_REVOKED");
+  await owner.close();
+  const acquired = await reclaimer.openProject(source, "error", undefined, "reclaimer", { mode: "write" });
+  assert.equal(acquired.structuredContent.ok, true, JSON.stringify(acquired.structuredContent));
+});
