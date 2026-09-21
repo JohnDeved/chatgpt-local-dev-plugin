@@ -241,7 +241,9 @@ test("real stdio client receives locally queued steering, acknowledges, and fini
     const start = await client.callTool({ name: "run.start", arguments: { goal: "Verify local steering", plan: "Test a read-only status call." } });
     const id = start.structuredContent.data.run.id;
     const beforePlan = await client.callTool({ name: "dev.run", arguments: { argv: [process.execPath, "--version"] } });
-    assert.equal(beforePlan.structuredContent.error.code, "RUN_TODO_LIST_REQUIRED");
+    assert.equal(beforePlan.structuredContent.error.code, "NO_ACTIVE_PROJECT");
+    const unsafeBeforePlan = await client.callTool({ name: "dev.run", arguments: { argv: [process.execPath, "-e", "process.exit(0)"] } });
+    assert.equal(unsafeBeforePlan.structuredContent.error.code, "RUN_TODO_LIST_REQUIRED");
     const plan = await client.callTool({ name: "run.update", arguments: { runId: id, summary: "Publish work before dispatch", todos: [{ id: "status", title: "Inspect status", status: "in_progress" }] } });
     assert.notEqual(plan.isError, true);
     const directory = join(home, ".local-dev/activity");

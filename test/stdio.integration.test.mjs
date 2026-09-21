@@ -249,6 +249,8 @@ test("streams human-readable progress for long native tools", async () => {
     const nodeVersionLabel = `${JSON.stringify(process.execPath)} ${JSON.stringify("--version")}`;
     assert.equal(batchUpdates.some(({ message }) => message === `Step 1/2: ${nodeVersionLabel}`), true);
     assert.equal(batchUpdates.some(({ message }) => message === `Step 2/2: ${nodeVersionLabel}`), true);
+    assert.equal(batchUpdates.some(({ message }) => message === `Running ${nodeVersionLabel}…`), false);
+    assert.equal(batchUpdates.some(({ message }) => /Completed step/u.test(message)), false);
     assert.equal(batchUpdates.some(({ message }) => /Completed all 2 command steps/u.test(message)), true);
   } finally {
     await client.close();
@@ -325,6 +327,19 @@ test("opens a configured project and runs argv without a shell", async () => {
     });
     assert.equal(batch.result.structuredContent.ok, true);
     assert.equal(batch.result.structuredContent.data.steps.length, 2);
+    const failedBatch = await client.request("tools/call", {
+      name: "dev.batch",
+      arguments: {
+        steps: [
+          { argv: [process.execPath, "-e", "process.exit(7)"] },
+          { argv: [process.execPath, "--version"] },
+        ],
+      },
+    });
+    assert.equal(failedBatch.result.structuredContent.ok, false);
+    assert.match(failedBatch.result.structuredContent.error.message, /Batch step 1 failed:/u);
+    assert.match(failedBatch.result.structuredContent.error.message, /COMMAND_EXIT_NONZERO/u);
+    assert.equal(failedBatch.result.structuredContent.data.steps.length, 1);
     const background = await client.request("tools/call", {
       name: "dev.run",
       arguments: {

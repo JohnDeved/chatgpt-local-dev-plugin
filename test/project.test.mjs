@@ -64,3 +64,25 @@ test("keeps created projects and cleans temporary projects on close", async () =
     await rm(root, { recursive: true, force: true });
   }
 });
+
+
+test("ambiguous project errors include bounded candidate paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "local-dev-ambiguous-"));
+  const first = join(root, "first");
+  const second = join(root, "second");
+  const runtime = new CoreRuntime([root], []);
+  try {
+    await mkdir(first, { recursive: true });
+    await mkdir(second, { recursive: true });
+    await writeFile(join(first, "package.json"), JSON.stringify({ name: "shared-project" }), "utf8");
+    await writeFile(join(second, "package.json"), JSON.stringify({ name: "shared-project" }), "utf8");
+    const result = await runtime.openProject("shared-project", "error");
+    assert.equal(result.structuredContent.ok, false);
+    assert.equal(result.structuredContent.error.code, "AMBIGUOUS_PROJECT");
+    assert.equal(result.structuredContent.error.message.includes(await realpath(first)), true);
+    assert.equal(result.structuredContent.error.message.includes(await realpath(second)), true);
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
