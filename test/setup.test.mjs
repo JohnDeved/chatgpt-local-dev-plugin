@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { readSetupStatus, runSetup, setupPaths, uninstall } from "../dist/setup/index.js";
+import { readSetupStatus, runSetup, setupPaths, uninstall, watchdogCommand } from "../dist/setup/index.js";
 import { installLaunchAgent, launchAgentPlist, removeLaunchAgent } from "../dist/setup/platform.js";
 
 const fakeSource = `#!/usr/bin/env node
@@ -121,4 +121,13 @@ test("launch agent is escaped, loaded idempotently, and removable", async () => 
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+});
+
+
+test("watchdog prevents idle system sleep on AC and battery", () => {
+  const command = watchdogCommand();
+  assert.equal(command.program, "/usr/bin/caffeinate");
+  assert.equal(command.args[0], "-i");
+  assert.equal(command.args.includes("-s"), false);
+  assert.equal(command.args.includes(process.execPath), true);
 });

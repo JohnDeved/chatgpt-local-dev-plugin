@@ -39,9 +39,9 @@ function mcpCommand(): { command: string; serverPath: string } {
   return { command: [process.execPath, serverPath].map(quoteArgument).join(" "), serverPath };
 }
 
-function watchdogCommand(): { args: string[]; program: string } {
+export function watchdogCommand(): { args: string[]; program: string } {
   const watchdogPath = fileURLToPath(new URL("../watchdog-cli.js", import.meta.url));
-  return { program: "/usr/bin/caffeinate", args: ["-s", process.execPath, watchdogPath] };
+  return { program: "/usr/bin/caffeinate", args: ["-i", process.execPath, watchdogPath] };
 }
 
 async function executable(path: string): Promise<boolean> {
@@ -257,7 +257,7 @@ export async function runSetup(
       const watchdog = watchdogCommand();
       await installLaunchAgent(paths, watchdog.program, watchdog.args);
       serviceInstalled = true;
-      reporter.line("[✓] macOS tunnel supervisor installed; idle sleep is prevented on AC power and wake recovery is enabled");
+      reporter.line("[✓] macOS tunnel supervisor installed; idle system sleep is prevented on AC and battery power; wake recovery is enabled");
     }
     const state: SetupState = {
       version: 1,
