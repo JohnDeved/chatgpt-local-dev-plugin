@@ -11,7 +11,7 @@ import { ActivityHub, activityEvent } from "./activity.js";
 import { ASK_TOOL_NAME, askTool } from "./ask-tool.js";
 import { chromeCompatibilityEntries } from "./chrome-compat.js";
 import { loadConfiguration } from "./config/index.js";
-import { coreTools, CoreRuntime } from "./core/index.js";
+import { commandAccessPlan, coreTools, CoreRuntime } from "./core/index.js";
 import { resolveElicitation } from "./elicitation.js";
 import { createToolProgress, type ToolProgress } from "./progress.js";
 import { ProxyManager } from "./proxy.js";
@@ -27,7 +27,7 @@ const SERVER_INSTRUCTIONS = [
   "Keep the user visibly informed during Local Dev work.",
   "Begin each user-request workflow with run.start: provide the user goal, concise title, and a short public plan. Reuse its runId for run.update and run.finish.",
   "Use the ask tool when a real user choice materially changes the work. Give 2–6 explicit options and one recommended option. In Auto-approve all mode the user gets 90 seconds to override before Local Dev returns the recommendation; do not use Ask for routine permissions or secrets.",
-  "Before substantive work, publish a nonempty run.update.todos list with stable IDs. Keep queued, in_progress, paused, completed, or cancelled states explicit. Report steering implementation separately with steeringTasks; acknowledgement is not completion. Unfinished work remains in every subsequent tool response and prevents a completed run.",
+  "Read-only reconnaissance may happen before planning. Before any write-capable or otherwise substantive work, publish a nonempty run.update.todos list with stable IDs. Keep queued, in_progress, paused, completed, or cancelled states explicit. Report steering implementation separately with steeringTasks; acknowledgement is not completion. Unfinished work remains in every subsequent tool response and prevents a completed run.",
   "Publish run.update at meaningful milestones, before long operations, and when your approach changes. These are concise public plans/progress/decision summaries, never private chain-of-thought or an invented thinking stream.",
   "Local user steering is returned in tool-response text. Before further actions, acknowledge the returned steering message IDs using run.update and explain how you will adapt, subject to existing permissions and safety rules.",
   "Before your final answer, call run.finish with a truthful completed, failed, or cancelled outcome and summary. Completed runs stop their owned background processes by default; set backgroundProcessPolicy=keep only when a persistent server/service is an intentional user deliverable. Never infer completion from inactivity.",
@@ -50,6 +50,25 @@ const SERVER_INSTRUCTIONS = [
   "Use relative cwd for monorepo subdirectories. After dev.run with background=true, use dev.poll to inspect the single tracked background process and dev.stop to terminate it. When you only need completion, prefer dev.poll with a bounded waitMs instead of repeated immediate polls; use waitMs=0 only for output or URL inspection. Do not run sleep or manual ps loops solely to wait.",
   "After all file-changing operations for a user request, run the repository check and call dev.diff at most once.",
 ].join(" ");
+
+function commandInputReadOnly(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  if (!Array.isArray(input.argv) || !input.argv.every((part) => typeof part === "string" && part.length > 0)) return false;
+  return commandAccessPlan(input.argv as string[], input.background === true).readOnly;
+}
+
+function invocationReadOnly(name: string, arguments_: unknown, readOnlyHint: boolean): boolean {
+  if (readOnlyHint) return true;
+  if (name === "dev.run") return commandInputReadOnly(arguments_);
+  if (name !== "dev.batch" || typeof arguments_ !== "object" || arguments_ === null || Array.isArray(arguments_)) return false;
+  const steps = (arguments_ as Record<string, unknown>).steps;
+  return Array.isArray(steps) && steps.length > 0 && steps.every((step) => commandInputReadOnly(step));
+}
+
+function mayInspectBeforeTodos(name: string, readOnly: boolean): boolean {
+  return readOnly || ["project.current", "project.release", "dev.poll", "dev.stop", ASK_TOOL_NAME].includes(name);
+}
 
 export function retryableClose(action: () => Promise<void>): () => Promise<void> {
   let active: Promise<void> | undefined;
@@ -124,8 +143,12 @@ export async function runServer(): Promise<void> {
     const remoteProgress = createToolProgress(metadata, extra.sendNotification);
     try {
       activity.runs.assertCanProceed(run.id);
-      if (!["project.current", "dev.poll", "dev.stop", ASK_TOOL_NAME].includes(params.name)) activity.runs.requireTodoList(run.id);
-      return await activity.execute(entry.tool, params.arguments ?? {}, async (signal) => {
+      const readOnly = invocationReadOnly(params.name, params.arguments ?? {}, entry.tool.annotations?.readOnlyHint === true);
+      if (!mayInspectBeforeTodos(params.name, readOnly)) activity.runs.requireTodoList(run.id);
+      const invocationTool = readOnly
+        ? { ...entry.tool, annotations: { ...(entry.tool.annotations ?? {}), readOnlyHint: true, destructiveHint: false } }
+        : entry.tool;
+      return await activity.execute(invocationTool, params.arguments ?? {}, async (signal) => {
         const progress: ToolProgress = {
           async report(message, fraction) {
             activityEvent("operation.progress", { message });
@@ -137,7 +160,7 @@ export async function runServer(): Promise<void> {
           ...(metadata === undefined ? {} : { meta: metadata }), runOwner: owner, signal, progress,
         });
         const result = runtime.isProjectBoundTool(params.name)
-          ? await runtime.callProjectBoundTool(owner, params.name, entry.tool.annotations?.readOnlyHint !== true, call)
+          ? await runtime.callProjectBoundTool(owner, params.name, !readOnly, call)
           : await call();
         const failed = result.isError === true || result.structuredContent?.ok === false;
         await progress.report(failed ? `${entry.tool.title ?? entry.tool.name} failed` : toolInvokedStatus(entry.tool), 1);

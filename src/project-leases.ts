@@ -168,7 +168,10 @@ export class ProjectLeases {
     return await this.store.transaction(async state => {
       await this.reconcile(state); const lease = this.owned(state, generation, owner);
       if (lease.pending) throw new LeaseError("LEASE_NOT_COMMITTED");
-      if (write && lease.mode !== "write") throw new LeaseError("PROJECT_READ_ONLY", { allowed: ["project.read", "project.files", "project.current", "project.release"], path: lease.scope.path });
+      if (write && lease.mode !== "write") throw new LeaseError("PROJECT_READ_ONLY", {
+        allowed: ["project.read", "project.files", "project.current", "project.release", "dev.run/dev.batch inspection-only commands"],
+        path: lease.scope.path,
+      });
       matches(await projectScope(lease.scope.path), lease.scope, lease.mode === "read");
       const operation = randomUUID(); lease.operations.push({ id: operation, write });
       lease.expires = Date.now() + lease.ttl; return operation;

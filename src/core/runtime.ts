@@ -11,6 +11,7 @@ import { LeaseError } from "../lease-storage.js";
 import { ProjectLeases, type OpenLeaseOptions } from "../project-leases.js";
 import { failure, success } from "../result.js";
 import type { JsonObject, JsonValue, ToolCallResult } from "../types.js";
+import { commandAccessPlan } from "./command-access.js";
 import { commandLabel } from "./command-label.js";
 import { beginWorkingTreeDiff, finishDiff } from "./diff.js";
 import { ProcessManager, type ProcessSnapshot } from "./process.js";
@@ -145,11 +146,13 @@ async function resolveProjectTarget(
 ): Promise<ProjectResolution> {
   const matches = await resolveProject(query, roots);
   if (matches.length > 1) {
+    const preview = matches.slice(0, 8).map((path) => `${basename(path)} (${path})`).join("; ");
+    const remaining = matches.length > 8 ? `; plus ${matches.length - 8} more` : "";
     return {
       error: failure(
         "project.open",
         "AMBIGUOUS_PROJECT",
-        `Project query matched ${matches.length} configured directories. Choose the best candidate and retry with its exact path.`,
+        `Project query matched ${matches.length} configured directories. Candidates: ${preview}${remaining}. Retry with the best exact path.`,
         { candidates: matches.map((path) => ({ name: basename(path), path })) },
       ),
     };
@@ -775,10 +778,12 @@ export class CoreRuntime {
     allowNonZero = false,
     progress?: ToolProgress,
     session = "runtime",
+    reportLifecycle = true,
   ): Promise<ToolCallResult> {
     if (this.closing) return failure("dev.run", "RUNTIME_CLOSING", "The runtime is closing and cannot start new work.");
     const activeProject = this.activeProjects.get(session);
     if (activeProject === undefined) return failure("dev.run", "NO_ACTIVE_PROJECT", "Resolve a project before running a command.");
+    const access = commandAccessPlan(argv, background);
     let backgroundToken: number | undefined;
     if (background) {
       const claimed = await this.claimBackground(session);
@@ -792,9 +797,11 @@ export class CoreRuntime {
     let backgroundRetained = false;
     let unconfirmedForeground: ProcessSnapshot | undefined;
     try {
-      await progress?.report(background ? `Starting ${label} in the background…` : `Running ${label}…`, 0.1);
+      if (reportLifecycle) {
+        await progress?.report(background ? `Starting ${label} in the background…` : `Running ${label}…`, 0.1);
+      }
       if (this.leases !== undefined && activeProject.generation !== undefined) {
-        operation = await this.leases.access(session, activeProject.generation, true);
+        operation = await this.leases.access(session, activeProject.generation, !access.readOnly);
       }
       const resolvedCwd = await commandCwd(activeProject.path, cwd);
       if (this.closing) throw new Error("RUNTIME_CLOSING");
@@ -809,13 +816,15 @@ export class CoreRuntime {
       }
       if (background) backgroundRetained = true;
       if (!background && result.exitCode !== 0 && !allowNonZero) {
-        await progress?.report(`${label} exited with status ${result.exitCode}`, 0.9);
+        if (reportLifecycle) await progress?.report(`${label} exited with status ${result.exitCode}`, 0.9);
         return failure("dev.run", "COMMAND_EXIT_NONZERO", `Command exited with status ${result.exitCode}.`, processData(result));
       }
-      await progress?.report(
-        background ? `Started ${label} as process ${result.pid}` : `Finished ${label} with exit code ${result.exitCode}`,
-        0.9,
-      );
+      if (reportLifecycle) {
+        await progress?.report(
+          background ? `Started ${label} as process ${result.pid}` : `Finished ${label} with exit code ${result.exitCode}`,
+          0.9,
+        );
+      }
       return success("dev.run", processData(result), background ? `started pid=${result.pid}` : `exit=${result.exitCode}`);
     } catch (error) {
       if (error instanceof LeaseError) return leaseFailure("dev.run", error);
@@ -823,7 +832,7 @@ export class CoreRuntime {
       const snapshot = errorSnapshot(error);
       if (code === "COMMAND_STOP_UNCONFIRMED") unconfirmedForeground = snapshot;
       if (code === "COMMAND_TIMEOUT") {
-        await progress?.report(`${label} timed out and was stopped`, 0.9);
+        if (reportLifecycle) await progress?.report(`${label} timed out and was stopped`, 0.9);
         return failure(
           "dev.run",
           code,
@@ -840,7 +849,7 @@ export class CoreRuntime {
       if (code === "INVALID_ARGV") return failure("dev.run", code, "argv must contain a command and non-empty arguments.");
       if (code === "INVALID_SHELL") return failure("dev.run", code, "Shell evaluation flags are not allowed; pass the executable and arguments directly.");
       if (code === "INVALID_CWD") return failure("dev.run", code, "cwd must be an existing relative directory inside the active project.");
-      await progress?.report(`${label} could not be started`, 0.9);
+      if (reportLifecycle) await progress?.report(`${label} could not be started`, 0.9);
       return failure("dev.run", "COMMAND_FAILED", "Command could not be started.");
     } finally {
       const ownership = backgroundToken === undefined ? undefined : this.backgroundOwnership;
@@ -902,7 +911,7 @@ export class CoreRuntime {
   ): Promise<ToolCallResult> {
     const results: JsonValue[] = [];
     let firstFailure: number | null = null;
-    await progress?.report(`Preparing ${steps.length} command steps…`, 0.05);
+    let firstFailureSummary: string | null = null;
     for (const [index, step] of steps.entries()) {
       currentActivity()?.signal.throwIfAborted();
       const label = commandLabel(step.argv);
@@ -918,6 +927,7 @@ export class CoreRuntime {
         step.allowNonZero === true,
         progress,
         session,
+        false,
       );
       const structured = command.structuredContent;
       results.push({
@@ -927,20 +937,20 @@ export class CoreRuntime {
         data: structured.data,
         error: structured.error === null ? null : { code: structured.error.code, message: structured.error.message },
       });
-      await progress?.report(
-        structured.ok
-          ? `Completed step ${index + 1}/${steps.length}: ${label}`
-          : `Step ${index + 1}/${steps.length} failed: ${label}`,
-        0.1 + ((index + 1) / steps.length) * 0.75,
-      );
-      if (!structured.ok && firstFailure === null) firstFailure = index;
+      if (!structured.ok && firstFailure === null) {
+        firstFailure = index;
+        const error = structured.error;
+        firstFailureSummary = error === null
+          ? label
+          : `${label} — ${error.code}: ${error.message}`;
+      }
       if (!structured.ok && stopOnError) break;
     }
     if (firstFailure !== null) {
       return failure(
         "dev.batch",
         "BATCH_STEP_FAILED",
-        `Batch step ${firstFailure + 1} failed.`,
+        `Batch step ${firstFailure + 1} failed: ${firstFailureSummary ?? "unknown error"}.`,
         { steps: results, failedStep: firstFailure },
       );
     }

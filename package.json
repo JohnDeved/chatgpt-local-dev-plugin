@@ -21,7 +21,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "clean": "node scripts/clean.mjs",
     "polish": "npm run check && fallow audit && npm run polish:report",
-    "polish:report": "fallow dead-code && fallow dupes && fallow health --score --targets --report-only",
+    "polish:report": "node scripts/polish-report.mjs",
     "menu:build": "node scripts/menu-bar.mjs",
     "menu:check": "node scripts/menu-bar.mjs --check",
     "menu:install": "node scripts/menu-bar.mjs --install --open",

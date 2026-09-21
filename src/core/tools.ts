@@ -257,7 +257,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
       tool: withToolStatus({
         name: "dev.run",
         title: "Run command",
-        description: "Use this when one executable must run in the active project. Pass argv directly, use cwd for a relative subdirectory, and never invoke a shell with evaluation flags.",
+        description: "Use this when one executable must run in the active project. Pass argv directly, use cwd for a relative subdirectory, and never invoke a shell with evaluation flags. A conservative set of intrinsic version/Git metadata inspections can run under a read lease; every other command requires a write lease.",
         inputSchema: {
           type: "object",
           properties: {
@@ -293,7 +293,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
       tool: withToolStatus({
         name: "dev.batch",
         title: "Run command batch",
-        description: "Use this when two or more bounded foreground commands should run sequentially in the active project. Each step receives a direct argv array; no shell evaluation is allowed.",
+        description: "Use this when two or more bounded foreground commands should run sequentially in the active project. Each step receives a direct argv array; no shell evaluation is allowed. A batch can run under a read lease only when every step is classified as inspection-only.",
         inputSchema: {
           type: "object",
           properties: {

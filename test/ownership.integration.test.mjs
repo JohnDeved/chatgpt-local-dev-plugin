@@ -100,6 +100,10 @@ test("live independent readers share a project while a writer is excluded", { ti
   const reads = await Promise.all([a.call("a", "project.read", { path: "receipt.txt" }), b.call("b", "project.read", { path: "receipt.txt" })]);
   assert.equal(reads[0].data.text, "reviewable source receipt\n"); assert.equal(reads[1].data.text, reads[0].data.text);
   assert.equal((await c.call("c", "project.open", { query: f.source, mode: "write" })).error.code, "PROJECT_IN_USE");
+  assert.equal((await a.call("a", "dev.run", { argv: [process.execPath, "--version"] })).ok, true);
+  assert.equal((await a.call("a", "dev.batch", {
+    steps: [{ argv: [process.execPath, "--version"] }, { argv: [process.execPath, "--version"] }],
+  })).ok, true);
   assert.equal((await a.call("a", "dev.run", { argv: [process.execPath, "-e", "process.stdout.write('must not run')"] })).error.code, "PROJECT_READ_ONLY");
   await a.call("a", "project.release", { generation: ra.data.generation });
   assert.equal((await c.call("c", "project.open", { query: f.source, mode: "write" })).error.code, "PROJECT_IN_USE");
