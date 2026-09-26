@@ -150,6 +150,8 @@ test("production stdio server exposes tool-only native tools with ChatGPT status
       "project.open",
       "project.current",
       "project.read",
+      "project.write",
+      "project.edit",
       "project.files",
       "project.release",
       "project.forceRelease",
@@ -502,4 +504,78 @@ test("paginates, filters, namespaces, sanitizes, and forwards downstream tools",
     await client.close();
     await rm(home, { recursive: true, force: true });
   }
+});
+
+
+test("native text edits are discoverable and work over real stdio without downstream servers", async () => {
+  const { home, project } = await fixture();
+  const client = new McpProcess({ ...process.env, HOME: home });
+  const invoke = async (name, args, session) => {
+    const reply = await client.request("tools/call", { name, arguments: args, ...(session ? { _meta: { "openai/session": session } } : {}) });
+    return reply.result.structuredContent;
+  };
+  try {
+    const initialized = await initialize(client);
+    assert.match(initialized.result.instructions, /native project\.write/u);
+    assert.match(initialized.result.instructions, /not Python\/Node code strings/u);
+    assert.match(initialized.result.instructions, /tool-discovery\/activation gap/u);
+    const listed = await client.request("tools/list", {});
+    for (const name of ["project.write", "project.edit"]) {
+      const tool = listed.result.tools.find((entry) => entry.name === name);
+      assert.ok(tool, `MCP tools/list must advertise ${name}`);
+      assert.equal(tool.annotations.readOnlyHint, false);
+      assert.equal(tool.annotations.destructiveHint, true);
+      assert.equal(tool.inputSchema.additionalProperties, false);
+    }
+    const opened = await invoke("project.open", { query: "demo", mode: "write" });
+    assert.equal(opened.ok, true);
+    const text = "export function greeting() {\r\n\treturn 'café 🟢';\r\n}\r\n";
+    const created = await invoke("project.write", { path: "src/greeting.ts", content: text });
+    assert.equal(created.ok, true, JSON.stringify(created));
+    const read = await invoke("project.read", { path: "src/greeting.ts" });
+    assert.equal(read.data.text, text);
+    assert.equal(read.data.sha256, created.data.sha256);
+    assert.equal(read.data.bytes, Buffer.byteLength(text));
+    const args = {
+      path: "src/greeting.ts", expectedSha256: read.data.sha256,
+      edits: [{ oldText: "café 🟢", newText: "hello 🟣" }],
+    };
+    const edited = await invoke("project.edit", args);
+    assert.equal(edited.ok, true, JSON.stringify(edited));
+    assert.equal(edited.data.editsApplied, 1);
+    assert.notEqual(edited.data.sha256, read.data.sha256);
+    assert.equal((await invoke("project.edit", args)).error.code, "PROJECT_FILE_CHANGED");
+    assert.equal(await readFile(join(project, "src/greeting.ts"), "utf8"), text.replace("café 🟢", "hello 🟣"));
+    const escaped = await invoke("project.write", { path: "../outside.txt", content: "bad" });
+    assert.equal(escaped.error.code, "INVALID_PROJECT_PATH");
+    assert.equal((await invoke("project.write", { path: "x", content: "x", owner: "other" })).error.code, "INVALID_ARGUMENTS");
+
+    await invoke("project.release", { generation: opened.data.generation });
+    await readySession(client, "reader");
+    assert.equal((await invoke("project.open", { query: "demo", mode: "read" }, "reader")).ok, true);
+    assert.equal((await invoke("project.read", { path: "src/greeting.ts" }, "reader")).data.sha256, edited.data.sha256);
+    assert.equal((await invoke("project.edit", { ...args, expectedSha256: edited.data.sha256 }, "reader")).error.code, "PROJECT_READ_ONLY");
+    assert.equal((await invoke("project.write", { path: "blocked.txt", content: "bad" }, "reader")).error.code, "PROJECT_READ_ONLY");
+    assert.equal(client.stderr, "");
+  } finally { await client.close(); await rm(home, { recursive: true, force: true }); }
+});
+
+test("new editing tools cannot bypass the declared-work gate", async () => {
+  const { home } = await fixture();
+  const client = new McpProcess({ ...process.env, HOME: home });
+  try {
+    await client.request("initialize", {
+      protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "file-edit-gate", version: "1" },
+    });
+    client.notify("notifications/initialized", {});
+    const started = await client.request("tools/call", { name: "run.start", arguments: { goal: "Check edit task gating" } });
+    assert.equal(started.result.structuredContent.ok, true);
+    for (const [name, args] of [
+      ["project.write", { path: "file.txt", content: "not written" }],
+      ["project.edit", { path: "file.txt", expectedSha256: "0".repeat(64), edits: [{ oldText: "x", newText: "y" }] }],
+    ]) {
+      const result = await client.request("tools/call", { name, arguments: args });
+      assert.equal(result.result.structuredContent.error.code, "RUN_TODO_LIST_REQUIRED");
+    }
+  } finally { await client.close(); await rm(home, { recursive: true, force: true }); }
 });

@@ -1,5 +1,6 @@
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 
+import { MAX_EDITS, MAX_TEXT_BYTES, SHA256_PATTERN, type TextEdit } from "./files.js";
 import { failure } from "../result.js";
 import type { RegistryEntry } from "../registry.js";
 import { withToolStatus } from "../tool-metadata.js";
@@ -80,6 +81,28 @@ function batchStep(value: unknown): BatchStep | undefined {
     ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs as number }),
     ...(input.allowNonZero === undefined ? {} : { allowNonZero: input.allowNonZero as boolean }),
   };
+}
+
+function validFilePath(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 1024;
+}
+
+function validFileContent(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_TEXT_BYTES;
+}
+
+function validHash(value: unknown): value is string {
+  return typeof value === "string" && new RegExp(SHA256_PATTERN, "u").test(value);
+}
+
+function textEdits(value: unknown): value is TextEdit[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= MAX_EDITS && value.every((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+    const item = entry as Record<string, unknown>;
+    return typeof item.oldText === "string" && item.oldText.length > 0 && item.oldText.length <= MAX_TEXT_BYTES
+      && validFileContent(item.newText)
+      && Object.keys(item).every((key) => ["oldText", "newText"].includes(key));
+  });
 }
 
 function validMissingAction(value: unknown): value is MissingProjectAction {
@@ -164,7 +187,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
       tool: withToolStatus({
         name: "project.read",
         title: "Read project file",
-        description: "Read one bounded UTF-8 file inside the authenticated active project.",
+        description: "Read one UTF-8 project file (maximum 1 MiB) and return its exact text, byte count and sha256. Use that hash as expectedSha256 for project.edit or replacing an existing file with project.write. No newline or whitespace normalization is performed.",
         inputSchema: {
           type: "object",
           properties: { path: { type: "string", minLength: 1, maxLength: 1024 } },
@@ -174,9 +197,76 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
         outputSchema: envelope,
         annotations: annotations(true, false, true),
       }, "Reading project file…", "Project file read"),
-      call: async (input, context) => typeof input.path === "string" && input.path.length > 0 && input.path.length <= 1024 && Object.keys(input).length === 1
-        ? result(await runtime.readProject(input.path, context?.runOwner ?? "runtime"))
+      call: async (input, context) => validFilePath(input.path) && Object.keys(input).length === 1
+        ? result(await runtime.readProject(input.path, context?.runOwner ?? "runtime", context?.signal))
         : invalid("project.read"),
+    },
+    {
+      tool: withToolStatus({
+        name: "project.write",
+        title: "Write project file",
+        description: "Create a UTF-8 source file, or replace it only with the current sha256 from project.read. Pass literal content with normal newlines; do not encode Python, shell, JSON or base64 wrappers. Without expectedSha256 an existing file is never overwritten. Parent directories are created by default. Preserves supplied whitespace exactly. Requires a write lease and normal approval; maximum 1 MiB.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string", minLength: 1, maxLength: 1024, description: "Relative file path inside the active project; no symlinks, parent traversal or .git metadata." },
+            content: { type: "string", maxLength: MAX_TEXT_BYTES, description: "Complete literal UTF-8 text. Empty content is allowed. Newlines, tabs and indentation are preserved, not formatted." },
+            expectedSha256: { type: "string", pattern: SHA256_PATTERN, description: "For replacing an existing file: its current sha256 from project.read. Omit only when creating a new file." },
+            createParents: { type: "boolean", default: true, description: "Create missing regular parent directories for a new file. Existing-file replacements never create missing paths." },
+          },
+          required: ["path", "content"],
+          additionalProperties: false,
+        },
+        outputSchema: envelope,
+        annotations: annotations(false, true, false),
+      }, "Writing project file…", "Project file written"),
+      call: async (input, context) => {
+        if (!validFilePath(input.path)) return invalid("project.write");
+        if (!validFileContent(input.content)) return invalid("project.write");
+        if (input.expectedSha256 !== undefined && !validHash(input.expectedSha256)) return invalid("project.write");
+        if (input.createParents !== undefined && typeof input.createParents !== "boolean") return invalid("project.write");
+        if (Object.keys(input).some((key) => !["path", "content", "expectedSha256", "createParents"].includes(key))) return invalid("project.write");
+        return result(await runtime.writeProject({
+          path: input.path, content: input.content,
+          ...(input.expectedSha256 === undefined ? {} : { expectedSha256: input.expectedSha256 }),
+          ...(input.createParents === undefined ? {} : { createParents: input.createParents }),
+        }, context?.runOwner ?? "runtime", context?.signal));
+      },
+    },
+    {
+      tool: withToolStatus({
+        name: "project.edit",
+        title: "Edit project file",
+        description: "Apply exact literal oldText/newText replacements to one UTF-8 project file after project.read. Each oldText must match once in the evolving text; missing or ambiguous matches fail without writing any edits. Provide surrounding context instead of regexes or line numbers. The hash must still match. Replacements are literal (including dollar signs/backslashes), whitespace is preserved, and the complete result is published atomically. Requires write lease/approval; at most 100 edits and a 1 MiB file.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string", minLength: 1, maxLength: 1024 },
+            expectedSha256: { type: "string", pattern: SHA256_PATTERN, description: "Current sha256 returned by project.read; a mismatch rejects stale edits." },
+            edits: {
+              type: "array", minItems: 1, maxItems: MAX_EDITS,
+              description: "Literal replacements applied in order in memory. All must succeed before the file changes; combined old/new text is bounded to 2 MiB.",
+              items: {
+                type: "object",
+                properties: {
+                  oldText: { type: "string", minLength: 1, maxLength: MAX_TEXT_BYTES, description: "Exact existing text, including whitespace, with enough context to match only once." },
+                  newText: { type: "string", maxLength: MAX_TEXT_BYTES, description: "Literal replacement text; an empty string deletes the matched text." },
+                },
+                required: ["oldText", "newText"], additionalProperties: false,
+              },
+            },
+          },
+          required: ["path", "expectedSha256", "edits"],
+          additionalProperties: false,
+        },
+        outputSchema: envelope,
+        annotations: annotations(false, true, false),
+      }, "Editing project file…", "Project file edited"),
+      call: async (input, context) => {
+        if (!validFilePath(input.path) || !validHash(input.expectedSha256) || !textEdits(input.edits)) return invalid("project.edit");
+        if (Object.keys(input).some((key) => !["path", "expectedSha256", "edits"].includes(key))) return invalid("project.edit");
+        return result(await runtime.editProject({ path: input.path, expectedSha256: input.expectedSha256, edits: input.edits }, context?.runOwner ?? "runtime", context?.signal));
+      },
     },
     {
       tool: withToolStatus({
@@ -257,7 +347,7 @@ export function coreTools(runtime: CoreRuntime): RegistryEntry[] {
       tool: withToolStatus({
         name: "dev.run",
         title: "Run command",
-        description: "Use this when one executable must run in the active project. Pass argv directly, use cwd for a relative subdirectory, and never invoke a shell with evaluation flags. A conservative set of intrinsic version/Git metadata inspections can run under a read lease; every other command requires a write lease.",
+        description: "Use project.write/project.edit for ordinary source-file changes, not Python/Node snippets. Use this when one executable must run in the active project. Pass argv directly, use cwd for a relative subdirectory, and never invoke a shell with evaluation flags. A conservative set of intrinsic version/Git metadata inspections can run under a read lease; every other command requires a write lease.",
         inputSchema: {
           type: "object",
           properties: {
