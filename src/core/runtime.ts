@@ -1,5 +1,6 @@
 import type { CallToolResult as McpCallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, stat } from "node:fs/promises";
+import { editTextFile, FileEditError, readTextDocument, writeTextFile, type EditInput, type WriteInput } from "./files.js";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
@@ -59,6 +60,14 @@ function leaseFailure(tool: string, error: unknown): ToolCallResult {
     }, {})),
   } as JsonValue;
   return failure(tool, error.code, error.code.replaceAll("_", " ").toLowerCase(), data);
+}
+
+function fileFailure(tool: string, error: unknown): ToolCallResult {
+  if (error instanceof FileEditError) return failure(tool, error.code, error.message, error.detail);
+  if (error instanceof Error && error.name === "AbortError") return failure(tool, "OPERATION_CANCELLED", "File operation was cancelled before publication.");
+  const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+  if (code === "ENOENT") return failure(tool, "PROJECT_ENTRY_NOT_FOUND", "The project file no longer exists. Read the current project before retrying.");
+  return failure(tool, "PROJECT_FILE_UNWRITABLE", "The file operation could not be completed. Check its path, permissions and available disk space.");
 }
 
 async function projectEntry(project: string, requested: string): Promise<string> {
@@ -688,16 +697,38 @@ export class CoreRuntime {
     } finally { finish(); }
   }
 
-  async readProject(path: string, session = "runtime"): Promise<ToolCallResult> {
+  private async mutateFile(tool: "project.write" | "project.edit", session: string, action: (root: string) => Promise<ToolCallResult>): Promise<ToolCallResult> {
+    return await this.serializeProject(session, async () => await this.guarded(session, tool, true, async () => {
+      const project = this.activeProjects.get(session) as ActiveProject;
+      if (project.mode !== "write") return failure(tool, "PROJECT_READ_ONLY", "Open the project with mode=write before editing files.");
+      try { return await action(project.path); }
+      catch (error) { return fileFailure(tool, error); }
+    }));
+  }
+
+  async writeProject(input: WriteInput, session = "runtime", signal?: AbortSignal): Promise<ToolCallResult> {
+    return await this.mutateFile("project.write", session, async (root) => {
+      const receipt = await writeTextFile(root, input, signal);
+      return success("project.write", { ...receipt }, `${receipt.changed ? "wrote" : "unchanged"} ${input.path}; ${receipt.bytes} bytes`);
+    });
+  }
+
+  async editProject(input: EditInput, session = "runtime", signal?: AbortSignal): Promise<ToolCallResult> {
+    return await this.mutateFile("project.edit", session, async (root) => {
+      const receipt = await editTextFile(root, input, signal);
+      return success("project.edit", { ...receipt }, `${receipt.editsApplied} exact edits; ${receipt.bytes} bytes; changed=${receipt.changed}`);
+    });
+  }
+
+  async readProject(path: string, session = "runtime", signal?: AbortSignal): Promise<ToolCallResult> {
     return await this.guarded(session, "project.read", false, async () => {
       const project = this.activeProjects.get(session) as ActiveProject;
       try {
         const candidate = await projectEntry(project.path, path);
-        const info = await stat(candidate);
-        if (!info.isFile() || info.size > 1_048_576) return failure("project.read", "PROJECT_FILE_UNREADABLE", "The project file is not a readable bounded regular file.");
-        const text = await readFile(candidate, "utf8");
-        return success("project.read", { path, text }, `${text.length} characters`);
+        const { text, sha256, bytes } = await readTextDocument(candidate, signal);
+        return success("project.read", { path, text, sha256, bytes }, `${bytes} bytes; sha256=${sha256}`);
       } catch (error) {
+        if (error instanceof FileEditError) return fileFailure("project.read", error);
         const code = error instanceof Error && /^[A-Z_]+$/u.test(error.message) ? error.message : "PROJECT_FILE_UNREADABLE";
         return failure("project.read", code, "The requested project file could not be read.");
       }

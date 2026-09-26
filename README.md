@@ -27,11 +27,13 @@ npm start
 
 `npm run check` is the exact repository-wide check. Run `npm run polish` for a repeatable Fallow change audit plus a repo-wide dead-code, duplication, and health report; agents also follow the Ponytail minimal-change ladder in [`AGENTS.md`](./AGENTS.md). The automated integration tests start the stdio server with temporary home directories and no credentials, browser, service, tunnel, or user configuration.
 
-The production server exposes fifteen native tools:
+The production server exposes these native tools (plus configured downstream tools):
 
 - `project.open`
 - `project.current`
 - `project.read`
+- `project.write`
+- `project.edit`
 - `project.files`
 - `project.release`
 - `project.forceRelease`
@@ -41,6 +43,7 @@ The production server exposes fifteen native tools:
 - `dev.poll`
 - `dev.stop`
 - `dev.diff`
+- `ask`
 - `run.start`
 - `run.update`
 - `run.finish`
@@ -50,6 +53,15 @@ The production server exposes fifteen native tools:
 `project.open` automatically resolves an existing project or creates a durable or temporary project when requested. Temporary projects are removed when the Local Dev runtime closes.
 
 `dev.run` rejects shell-evaluation flags, supports a validated relative `cwd`, returns retained output for nonzero exits and timeouts, and requires `allowNonZero: true` when a nonzero status is expected. A deliberately small allowlist of intrinsic version and Git-metadata inspections can run under a shared read lease; unknown commands, background commands, and anything that may mutate repository state still require a write lease. `dev.batch` runs two to twenty foreground argv commands sequentially without a shell and inherits read-only access only when every step is inspection-only.
+
+For ordinary source editing, use `project.write` for new UTF-8 files and `project.read` → `project.edit`
+for existing files. Read returns `sha256`; writes/edits return a new hash and byte count. New-file
+writes are create-only unless a matching `expectedSha256` is supplied. Exact text edits are checked
+in memory and published together, preserving line endings, tabs, Unicode, BOM and final-newline
+choice. No code generation or automatic formatting occurs in the transport. Prefer these tools
+over Python/Node file-writing snippets; use an available semantic tool for symbol refactors and
+`dev.run` for builds/tests/generators. See [`docs/file-editing.md`](./docs/file-editing.md) for examples,
+limits, safety checks and activation instructions.
 
 It reads the shared Codex MCP registry from `~/.codex/config.toml` without modifying it. Local-only project roots, selected downstream server aliases, optional allowlisted local-media inlining, argv-based project hooks, and generic downstream project bindings live in `~/.local-dev/config.json`; see [`docs/configuration.md`](./docs/configuration.md). Selected stdio and Streamable HTTP servers are discovered with pagination, filtered using the Codex settings, namespaced as `<alias>.<tool>`, and forwarded generically.
 

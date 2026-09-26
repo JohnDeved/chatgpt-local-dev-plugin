@@ -93,3 +93,17 @@ The desktop/runtime advertise Ask with capability `ask: 1`. If the active ChatGP
 ## Completed-run process lifecycle
 
 Successful runs stop their own background processes by default. `run.start.backgroundProcessPolicy` and `run.update.backgroundProcessPolicy` accept `cleanup` (default) or `keep`. Use `keep` only when a persistent server/service is an intentional user deliverable; it is not a general way to avoid cleanup. `run.finish(completed)` must confirm cleanup before recording completion and must never stop unrelated or other-run processes. Failed/cancelled runs do not pretend cleanup or unfinished work succeeded.
+
+## Native source editing
+
+Use `project.write` for new UTF-8 files and `project.read` followed by `project.edit` for exact
+changes. Preserve source layout in the supplied text; run the project's formatter separately.
+Use the read result's `sha256` as `expectedSha256`; stale hashes and ambiguous/missing old text
+require a fresh read or more exact context, never a blind overwrite. These tools are native and
+do not require an optional semantic server. Prefer an available semantic tool for symbol-aware
+refactors and `dev.run` for real builds/tests/generators, not ordinary text-writing snippets.
+
+If the active connector lacks these actions, state the activation gap. Updated source is not
+evidence that the running tunnel or conversation schema reloaded. Use the owner-controlled
+reconnect/tool-refresh workflow; never change approval policy or restart other active work to
+force new tools into a session. See `docs/file-editing.md` for limits and verification scope.
