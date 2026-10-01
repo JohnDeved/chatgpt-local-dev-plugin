@@ -111,6 +111,7 @@ test("launch agent is escaped, loaded idempotently, and removable", async () => 
     assert.match(source, /<key>RunAtLoad<\/key><true\/>/u);
     assert.match(source, /<key>KeepAlive<\/key><true\/>/u);
     assert.match(source, /<key>ThrottleInterval<\/key><integer>10<\/integer>/u);
+    assert.match(source, /<key>ProcessType<\/key><string>Interactive<\/string>/u);
     assert.doesNotMatch(source, /StartInterval/u);
     await installLaunchAgent(paths, "/tmp/tunnel-client", ["runtimes", "connect"], runner);
     await installLaunchAgent(paths, "/tmp/tunnel-client", ["runtimes", "connect"], runner);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { fork, execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, writeFile, rm, realpath, symlink, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm, realpath, rename, symlink, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -43,11 +43,12 @@ async function fixture(t) {
 }
 const open = (client, path, mode = "read", extra = {}) => client.call("open", { path, options: { mode, ...extra } });
 
-test("provider real independent readers exclude a writer and release independently", { timeout: 20000 }, async t => {
+test("provider real independent readers observe one exclusive writer", { timeout: 20000 }, async t => {
   const f = await fixture(t), a = await f.client("reader-a"), b = await f.client("reader-b"), c = await f.client("writer");
   const [x, y] = await Promise.all([open(a, f.source), open(b, f.source)]);
   assert.equal(x.ok, true, JSON.stringify(x)); assert.equal(y.ok, true, JSON.stringify(y));
-  assert.equal((await open(c, f.source, "write")).code, "PROJECT_IN_USE");
+  const writer = await open(c, f.source, "write"); assert.equal(writer.ok, true, JSON.stringify(writer));
+  assert.equal((await open(a, f.source, "write")).code, "PROJECT_IN_USE");
   assert.equal((await a.call("access", { generation: x.value.lease.generation, write: true })).code, "PROJECT_READ_ONLY");
   for (const [client, result] of [[a, x], [b, y]]) {
     const access = await client.call("access", { generation: result.value.lease.generation, write: false });
@@ -56,9 +57,9 @@ test("provider real independent readers exclude a writer and release independent
     await client.call("complete", { generation: result.value.lease.generation, operation: access.value });
   }
   await a.call("release", { generation: x.value.lease.generation });
-  assert.equal((await open(c, f.source, "write")).code, "PROJECT_IN_USE");
+  assert.equal((await open(a, f.source)).ok, true, "a reader can open after the writer");
   await b.call("release", { generation: y.value.lease.generation });
-  assert.equal((await open(c, f.source, "write")).ok, true);
+  assert.equal((await open(b, f.source, "write")).code, "PROJECT_IN_USE");
 });
 
 test("provider source-evidence switch yields only independent-acquisition release proof", { timeout: 20000 }, async t => {
@@ -99,7 +100,8 @@ test("provider refuses to expire active writer operations or claimed background 
   const f = await fixture(t), a = await f.client("writer"), b = await f.client("reviewer");
   const x = await open(a, f.source, "write", { leaseMs: 1000 }); const generation = x.value.lease.generation;
   const active = await a.call("access", { generation, write: true }); await delay(1200);
-  assert.equal((await open(b, f.source)).code, "PROJECT_IN_USE");
+  assert.equal((await open(b, f.source, "write")).code, "PROJECT_IN_USE");
+  assert.equal((await open(b, f.source)).ok, true);
   assert.equal((await a.call("release", { generation })).code, "PROJECT_HAS_ACTIVE_WORK");
   await a.call("complete", { generation, operation: active.value, background: [a.pid] });
   assert.equal((await a.call("release", { generation })).code, "PROJECT_HAS_ACTIVE_WORK");
@@ -115,10 +117,31 @@ test("provider canonicalizes aliases and rejects wrong source heads without acqu
   assert.equal((await open(a, f.source, "write", { expectedHead: "a".repeat(40) })).code, "PROJECT_HEAD_MISMATCH");
   const x = await open(a, f.source, "write", { expectedHead: head }); assert.equal(x.ok, true);
   const alias = join(f.root, "alias"); await symlink(f.source, alias);
-  assert.equal((await open(b, alias)).code, "PROJECT_IN_USE");
+  assert.equal((await open(b, alias, "write")).code, "PROJECT_IN_USE");
+  assert.equal((await open(b, alias)).ok, true);
   const markerBefore = await stat(join(f.registry, "transaction.lock"));
   await a.call("release", { generation: x.value.lease.generation }); await open(b, alias);
   assert.equal((await stat(join(f.registry, "transaction.lock"))).ino, markerBefore.ino, "cooperative transitions never unlink the lock");
+});
+
+test("stale read recovery retains active work and inode fencing without handoff proof", async t => {
+  const f = await fixture(t), a = await f.client("reader");
+  const git = (...args) => execFileSync("git", ["-C", f.source, ...args], { encoding: "utf8" }).trim();
+  git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "test@example.com");
+  git("add", "."); git("commit", "-qm", "initial");
+  const original = await open(a, f.source), generation = original.value.lease.generation;
+  const active = await a.call("access", { generation, write: false }); assert.equal(active.ok, true);
+  git("commit", "--allow-empty", "-qm", "advance");
+  assert.equal((await a.call("release", { generation })).code, "PROJECT_HAS_ACTIVE_WORK");
+  assert.equal((await a.call("open", { path: f.source, options: { mode: "read" }, previous: generation })).code, "PROJECT_HAS_ACTIVE_WORK");
+  await a.call("complete", { generation, operation: active.value });
+  const fresh = await a.call("open", { path: f.source, options: { mode: "read" }, previous: generation });
+  assert.equal(fresh.ok, true, JSON.stringify(fresh)); assert.equal(fresh.value.previousRelease, null);
+  assert.equal((await a.call("access", { generation, write: false })).code, "PROJECT_BINDING_REVOKED");
+  await rename(f.source, join(f.root, "moved-source")); await mkdir(f.source);
+  assert.equal((await a.call("access", { generation: fresh.value.lease.generation, write: false })).code, "PROJECT_REPLACED");
+  assert.equal((await a.call("release", { generation: fresh.value.lease.generation })).code, "PROJECT_REPLACED");
+  assert.equal((await a.call("open", { path: f.source, options: { mode: "read" }, previous: fresh.value.lease.generation })).code, "PROJECT_REPLACED");
 });
 
 test("injected signed store rejects tampering and keeps private permissions", async t => {
@@ -179,7 +202,7 @@ test("operation tokens reject duplicate completion and preserve each background 
   assert.equal((await a.call("complete", { generation, operation: second.value, background: [a.pid] })).ok, true);
   await a.call("background-exited", { generation, operation: first.value, pid: a.pid });
   assert.equal((await a.call("release", { generation })).code, "PROJECT_HAS_ACTIVE_WORK");
-  assert.equal((await open(b, f.source)).code, "PROJECT_IN_USE");
+  assert.equal((await open(b, f.source, "write")).code, "PROJECT_IN_USE");
   assert.equal((await a.call("background-exited", { generation, operation: first.value, pid: a.pid })).code, "BACKGROUND_OPERATION_MISMATCH");
   await a.call("background-exited", { generation, operation: second.value, pid: a.pid });
   assert.equal((await a.call("release", { generation })).ok, true);

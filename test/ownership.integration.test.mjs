@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -92,23 +92,102 @@ async function environment(t, options = {}) {
   return { home, source: join(home, "projects/source"), evidence: join(home, "projects/evidence"), client, calls };
 }
 
-test("live independent readers share a project while a writer is excluded", { timeout: 40000 }, async t => {
+test("live independent readers observe one exclusive writer", { timeout: 40000 }, async t => {
   const f = await environment(t), a = await f.client("reader-a"), b = await f.client("reader-b"), c = await f.client("writer");
   await a.ready("a"); await b.ready("b"); await c.ready("c");
   const [ra, rb] = await Promise.all([a.call("a", "project.open", { query: f.source, mode: "read" }), b.call("b", "project.open", { query: f.source, mode: "read" })]);
   assert.equal(ra.ok, true, JSON.stringify(ra)); assert.equal(rb.ok, true, JSON.stringify(rb));
   const reads = await Promise.all([a.call("a", "project.read", { path: "receipt.txt" }), b.call("b", "project.read", { path: "receipt.txt" })]);
   assert.equal(reads[0].data.text, "reviewable source receipt\n"); assert.equal(reads[1].data.text, reads[0].data.text);
-  assert.equal((await c.call("c", "project.open", { query: f.source, mode: "write" })).error.code, "PROJECT_IN_USE");
+  assert.equal((await c.call("c", "project.open", { query: f.source, mode: "write" })).ok, true);
+  assert.equal((await b.call("b", "project.open", { query: f.source, mode: "write" })).error.code, "PROJECT_IN_USE");
+  const changed = await c.call("c", "dev.run", { argv: [process.execPath, "-e", "require('node:fs').writeFileSync('receipt.txt', 'live observation')"] });
+  assert.equal(changed.ok, true);
+  assert.equal((await a.call("a", "project.read", { path: "receipt.txt" })).data.text, "live observation");
   assert.equal((await a.call("a", "dev.run", { argv: [process.execPath, "--version"] })).ok, true);
   assert.equal((await a.call("a", "dev.batch", {
     steps: [{ argv: [process.execPath, "--version"] }, { argv: [process.execPath, "--version"] }],
   })).ok, true);
   assert.equal((await a.call("a", "dev.run", { argv: [process.execPath, "-e", "process.stdout.write('must not run')"] })).error.code, "PROJECT_READ_ONLY");
   await a.call("a", "project.release", { generation: ra.data.generation });
-  assert.equal((await c.call("c", "project.open", { query: f.source, mode: "write" })).error.code, "PROJECT_IN_USE");
+  assert.equal((await a.call("a", "project.open", { query: f.source, mode: "read" })).ok, true);
   await b.call("b", "project.release", { generation: rb.data.generation });
-  assert.equal((await c.call("c", "project.open", { query: f.source, mode: "write" })).ok, true);
+  assert.equal((await b.call("b", "project.open", { query: f.source, mode: "write" })).error.code, "PROJECT_IN_USE");
+});
+
+test("read opening skips hooks and binding setup beside another session's background", { timeout: 30000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "localdev-observation-")));
+  const source = join(home, "source"), evidence = join(home, "evidence");
+  await mkdir(source); await mkdir(evidence); await writeFile(join(source, "receipt.txt"), "source");
+  let hookRuns = 0, bindingRuns = 0;
+  const processes = new ProcessManager();
+  const runProcess = processes.run.bind(processes);
+  processes.run = async (...args) => { if (!args[2]) hookRuns++; return await runProcess(...args); };
+  const runtime = new CoreRuntime([home], [{ projectRoot: source, argv: [process.execPath, "--version"] }],
+    [{ server: "fixture", tool: "activate", arguments: { path: "${projectPath}" } }],
+    async () => { bindingRuns++; return { content: [] }; }, new ProjectLeases(join(home, "registry")), processes);
+  t.after(async () => { await runtime.close(); await rm(home, { recursive: true, force: true }); });
+  assert.equal((await runtime.openProject(source, "error", undefined, "writer", { mode: "write" })).structuredContent.ok, true);
+  assert.equal(hookRuns, 1); assert.equal(bindingRuns, 1);
+  const started = (await runtime.run([process.execPath, "-e", "setInterval(() => {}, 1000)"], true, undefined, undefined, false, undefined, "writer")).structuredContent;
+  assert.equal(started.ok, true);
+  const observed = (await runtime.openProject(source, "error", undefined, "reader", { mode: "read" })).structuredContent;
+  assert.equal(observed.ok, true, JSON.stringify(observed));
+  assert.equal(observed.data.hooksRun, 0); assert.deepEqual(observed.data.bindings, []);
+  assert.equal(hookRuns, 1); assert.equal(bindingRuns, 1);
+  assert.equal((await runtime.readProject("receipt.txt", "reader")).structuredContent.data.text, "source");
+  assert.equal((await runtime.listProject(".", "reader")).structuredContent.ok, true);
+  assert.equal((await runtime.run([process.execPath, "--version"], false, undefined, undefined, false, undefined, "reader")).structuredContent.ok, true);
+  assert.equal((await runtime.run([process.execPath, "-e", "process.exit(0)"], false, undefined, undefined, false, undefined, "reader")).structuredContent.error.code, "PROJECT_READ_ONLY");
+  assert.equal((await runtime.run([process.execPath, "--version"], true, undefined, undefined, false, undefined, "reader")).structuredContent.error.code, "BACKGROUND_NOT_OWNED");
+  assert.equal((await runtime.openProject(evidence, "error", undefined, "writer", { mode: "read" })).structuredContent.error.code, "BACKGROUND_RUNNING");
+  const retained = (await runtime.poll(0, "writer")).structuredContent;
+  assert.equal(retained.data.pid, started.data.pid); assert.equal(retained.data.state, "running");
+  assert.equal((await runtime.stop(undefined, "reader")).structuredContent.error.code, "BACKGROUND_NOT_OWNED");
+  assert.equal((await runtime.stop(undefined, "writer")).structuredContent.data.state, "exited");
+  assert.equal((await runtime.run([process.execPath, "--version"], true, undefined, undefined, false, undefined, "reader")).structuredContent.error.code, "PROJECT_READ_ONLY");
+  const writer = runtime.currentProject("writer").structuredContent.data;
+  assert.equal((await runtime.releaseProject(writer.generation, "writer")).structuredContent.ok, true);
+  const upgraded = (await runtime.openProject(source, "error", undefined, "reader", { mode: "write" })).structuredContent;
+  assert.equal(upgraded.ok, true, JSON.stringify(upgraded));
+  assert.equal(upgraded.data.hooksRun, 1); assert.equal(upgraded.data.bindings.length, 1);
+  assert.equal(bindingRuns, 2);
+  assert.equal((await runtime.releaseProject(upgraded.data.generation, "reader")).structuredContent.ok, true);
+  const beforeFailure = (await runtime.openProject(source, "error", undefined, "reader", { mode: "read" })).structuredContent;
+  processes.run = async (...args) => {
+    if (args[0].includes("--version")) return { state: "exited", pid: null, exitCode: 7, signal: null, argv: args[0], cwd: args[1], background: false, startedAt: null, finishedAt: null, outputTail: "fixture setup failed", truncated: false, urls: [] };
+    return await runProcess(...args);
+  };
+  const failed = (await runtime.openProject(source, "error", undefined, "reader", { mode: "write" })).structuredContent;
+  assert.equal(failed.error.code, "PROJECT_HOOK_FAILED");
+  assert.deepEqual(runtime.currentProject("reader").structuredContent.data,
+    { path: source, kind: "existing", mode: "read", generation: beforeFailure.data.generation });
+  assert.equal((await runtime.readProject("receipt.txt", "reader")).structuredContent.ok, true);
+  assert.equal(bindingRuns, 2, "failed setup does not invoke bindings");
+});
+
+test("a committed HEAD change fences reads but permits explicit idle reopen and release", { timeout: 30000 }, async t => {
+  const f = await environment(t), a = await f.client("reader"), b = await f.client("writer");
+  const git = (...args) => execFileSync("git", ["-C", f.source, ...args], { encoding: "utf8" }).trim();
+  git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "test@example.com");
+  git("add", "."); git("commit", "-qm", "initial");
+  await a.ready("reader"); await b.ready("writer");
+  const original = await a.call("reader", "project.open", { query: f.source, mode: "read" });
+  assert.equal(original.ok, true);
+  assert.equal((await b.call("writer", "project.open", { query: f.source, mode: "write" })).ok, true);
+  const before = git("rev-parse", "HEAD");
+  git("commit", "--allow-empty", "-qm", "advance");
+  assert.equal((await a.call("reader", "project.read", { path: "receipt.txt" })).error.code, "PROJECT_HEAD_MISMATCH");
+  assert.equal((await a.call("reader", "project.open", { query: f.source, mode: "read", expectedHead: before })).error.code, "PROJECT_HEAD_MISMATCH");
+  const fresh = await a.call("reader", "project.open", { query: f.source, mode: "read" });
+  assert.equal(fresh.ok, true, JSON.stringify(fresh));
+  assert.notEqual(fresh.data.generation, original.data.generation);
+  assert.equal(fresh.data.previousRelease, null, "stale observation is not a source handoff receipt");
+  assert.equal((await a.call("reader", "project.release", { generation: original.data.generation })).error.code, "LEASE_GENERATION_MISMATCH");
+  assert.equal((await a.call("reader", "project.read", { path: "receipt.txt" })).ok, true);
+  git("commit", "--allow-empty", "-qm", "advance again");
+  const released = await a.call("reader", "project.release", { generation: fresh.data.generation });
+  assert.equal(released.ok, true, JSON.stringify(released)); assert.equal(released.data.handoffId, null);
 });
 
 test("switching source to evidence relinquishes old lease and proves independent handoff", { timeout: 30000 }, async t => {
@@ -178,6 +257,29 @@ test("background work pins its generation and retained snapshot to one session",
   const childPid = Number(await readFile(childPidFile, "utf8"));
   assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
   assert.equal((await a.call("worker", "project.release", { generation: lease.data.generation })).ok, true);
+});
+
+test("foreground completion cannot stop background work", { timeout: 30000 }, async t => {
+  const f = await environment(t), a = await f.client("multiplex");
+  await a.ready("owner"); await a.ready("peer");
+  const lease = await a.call("owner", "project.open", { query: f.source, mode: "write" });
+  assert.equal(lease.ok, true);
+  assert.equal((await a.call("peer", "project.open", { query: f.evidence, mode: "write" })).ok, true);
+  const started = await a.call("owner", "dev.run", {
+    argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+    background: true,
+  });
+  assert.equal(started.ok, true);
+  for (const [session, code] of [["owner", 0], ["peer", 7]]) {
+    const foreground = await a.call(session, "dev.run", { argv: [process.execPath, "-e", `process.exit(${code})`] });
+    assert.equal(foreground.ok, code === 0);
+    if (code !== 0) assert.equal(foreground.error.code, "COMMAND_EXIT_NONZERO");
+    const background = await a.call("owner", "dev.poll");
+    assert.equal(background.data.pid, started.data.pid);
+    assert.equal(background.data.state, "running");
+    assert.equal((await a.call("owner", "project.release", { generation: lease.data.generation })).error.code, "PROJECT_HAS_ACTIVE_WORK");
+  }
+  assert.equal((await a.call("owner", "dev.stop")).data.state, "exited");
 });
 
 test("concurrent replacement claims cannot stop the winning background process", { timeout: 30000 }, async t => {
