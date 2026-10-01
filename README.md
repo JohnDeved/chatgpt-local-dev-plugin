@@ -49,6 +49,8 @@ The production server exposes fifteen native tools:
 
 `project.open` automatically resolves an existing project or creates a durable or temporary project when requested. Temporary projects are removed when the Local Dev runtime closes.
 
+Read-only project observation can coexist with one exclusive writer and that writer's background job. Reads observe mutable working files; pin and recheck source hashes when consistency matters. Read opening skips setup hooks and automatic downstream activation. A writer commit fences the old read generation; explicitly reopen to refresh it. Stale read release does not produce a source handoff receipt.
+
 `dev.run` rejects shell-evaluation flags, supports a validated relative `cwd`, returns retained output for nonzero exits and timeouts, and requires `allowNonZero: true` when a nonzero status is expected. A deliberately small allowlist of intrinsic version and Git-metadata inspections can run under a shared read lease; unknown commands, background commands, and anything that may mutate repository state still require a write lease. `dev.batch` runs two to twenty foreground argv commands sequentially without a shell and inherits read-only access only when every step is inspection-only.
 
 It reads the shared Codex MCP registry from `~/.codex/config.toml` without modifying it. Local-only project roots, selected downstream server aliases, optional allowlisted local-media inlining, argv-based project hooks, and generic downstream project bindings live in `~/.local-dev/config.json`; see [`docs/configuration.md`](./docs/configuration.md). Selected stdio and Streamable HTTP servers are discovered with pagination, filtered using the Codex settings, namespaced as `<alias>.<tool>`, and forwarded generically.

@@ -18,7 +18,7 @@ supports explicit read/write mode and exact source identity constraints;
 setup hooks, and retained background children are pinned to their exact generation.
 
 The live stdio acceptance cases use disposable homes and registry directories.
-They cover concurrent readers, writer exclusion, scoped release, transactional
+They cover concurrent read-only observation alongside one exclusive writer, scoped release, transactional
 switching, stale-generation fencing, cooperative force-release, and independent
 runtime handoff. This source integration is not an installed deployment.
 
@@ -44,7 +44,9 @@ mode, session and random generation. Callers receive their session identity from
 the trusted transport dispatcher; tool schemas do not accept an arbitrary
 owner/runtime ID or a caller-authored success Boolean.
 
-Read leases coexist. Writers fence the canonical Git worktree root, so sibling
+Read leases coexist with one writer and observe mutable working files; they are
+not immutable snapshots. Pin and recheck source hashes for a consistent research
+report. Writers fence the canonical Git worktree root, so sibling
 package directories cannot own independent writers; separate worktrees remain
 independent. Non-Git scopes use ordinary canonical path overlap. Symlinks canonicalize to the same scope.
 A provisional lease protects selection; it cannot authorize reads/writes or mint
@@ -53,6 +55,13 @@ and commit is single-use. Abort leaves old ownership intact. Side-effecting setu
 hooks require a separately authenticated committed operation; the runtime never
 executes them under a bare provisional lease. Reads validate HEAD;
 writers may intentionally change it but cannot silently change the directory inode.
+After a writer commits, the old read generation rejects access. An authenticated
+idle reader can explicitly reopen at the new HEAD or relinquish its stale lease;
+neither transition mints a source handoff receipt for the changed observation.
+Read opening skips setup hooks and automatic downstream activation. Read-only
+downstream tool calls still perform the existing serialized project binding.
+Another session's background job does not prevent read opening; its owning session
+cannot switch away from its pinned generation, and poll/stop ownership is unchanged.
 
 A live idle lease may expire. A confirmed dead runtime's idle leases, including an uncommitted reservation with
 no authorized work, can be reconciled without waiting for TTL. Active write operations and recorded background work are quarantined instead of being guessed dead.
@@ -84,7 +93,7 @@ closing its kernel marker. Closed instances cannot create or continue ownership.
 ## Proven and unproven behavior
 
 `test/project-leases.test.mjs` starts real independent Node client processes against
-one injected directory. It verifies concurrent readers/excluded writer, source to
+one injected directory. It verifies concurrent readers/exclusive writer, source to
 evidence switching and independent acquisition, voluntary dead-owner exit,
 concurrent-writer exclusion, idle fencing, audited force-release, active-operation
 protection, path aliases, HEAD mismatch and authenticated-state tampering. Each

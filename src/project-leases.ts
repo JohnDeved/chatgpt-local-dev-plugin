@@ -111,7 +111,7 @@ export class ProjectLeases {
       const old = previous ? this.owned(state, previous, owner) : undefined;
       if (old?.pending) throw new LeaseError("PREVIOUS_LEASE_NOT_COMMITTED");
       if (old && !idle(old)) throw new LeaseError("PROJECT_HAS_ACTIVE_WORK");
-      const blockers = state.leases.filter(value => value !== old && overlaps(value.scope.writeDomain, scope.writeDomain) && (value.mode === "write" || options.mode === "write"));
+      const blockers = state.leases.filter(value => value !== old && overlaps(value.scope.writeDomain, scope.writeDomain) && value.mode === "write" && options.mode === "write");
       if (blockers.length) throw new LeaseError("PROJECT_IN_USE", { requested: { path: scope.path, mode: options.mode }, blockers, recovery: "Choose an independent worktree, wait for the writer, or use scoped release. Active writers/readers are not silently evicted." });
       if (options.handoffId) {
         const receipt = state.receipts.find(value => value.id === options.handoffId);
@@ -124,10 +124,14 @@ export class ProjectLeases {
       state.leases.push(lease); this.audit(state, "reserved", owner, { generation: lease.generation, path: scope.path, mode: options.mode }); return structuredClone(lease);
     });
   }
-  private remove(state: State, lease: Lease, scope: Scope): ReleaseReceipt {
+  private remove(state: State, lease: Lease, scope: Scope): ReleaseReceipt | null {
     if (!idle(lease)) throw new LeaseError("PROJECT_HAS_ACTIVE_WORK", { generation: lease.generation });
-    const receipt: ReleaseReceipt = { id: randomUUID(), from: lease.owner, fromGeneration: lease.generation, scope, to: null, toGeneration: null, expires: Date.now() + 300000, at: new Date().toISOString() };
     state.leases = state.leases.filter(value => value !== lease);
+    if (lease.mode === "read" && scope.head !== lease.scope.head) {
+      this.audit(state, "stale-read-relinquished", lease.owner, { generation: lease.generation, path: scope.path });
+      return null;
+    }
+    const receipt: ReleaseReceipt = { id: randomUUID(), from: lease.owner, fromGeneration: lease.generation, scope, to: null, toGeneration: null, expires: Date.now() + 300000, at: new Date().toISOString() };
     if (state.receipts.length >= 2048) state.receipts.shift();
     state.receipts.push(receipt); this.audit(state, "relinquished", lease.owner, { generation: lease.generation, handoffId: receipt.id, path: scope.path }); return receipt;
   }
@@ -151,7 +155,7 @@ export class ProjectLeases {
         if (state.leases.some(value => same(value.owner, receipt.from) && overlaps(value.scope.writeDomain, scope.writeDomain))) throw new LeaseError("SOURCE_REACQUIRED");
       }
       const oldScope = old ? await projectScope(old.scope.path) : null;
-      if (old && oldScope) matches(oldScope, old.scope, old.mode === "read");
+      if (old && oldScope) matches(oldScope, old.scope, false);
       // All validation precedes the atomic binding transition.
       const released = old && oldScope ? this.remove(state, old, oldScope) : null;
       if (receipt) { receipt.to = owner; receipt.toGeneration = next.generation; this.audit(state, "independent-acquisition", owner, { handoffId: receipt.id, generation }); }
@@ -198,14 +202,14 @@ export class ProjectLeases {
       lease.background = lease.background.filter(value => value.operation !== operation || value.pid !== pid);
     });
   }
-  private async releaseOpen(session: string, generation: string): Promise<{ released: false; relinquished: true; handoffId: string }> {
+  private async releaseOpen(session: string, generation: string): Promise<{ released: false; relinquished: true; handoffId: string | null }> {
     const owner = await this.owner(session);
     return await this.store.transaction(async state => {
       const lease = this.owned(state, generation, owner);
       if (lease.pending) throw new LeaseError("LEASE_NOT_COMMITTED");
       const scope = await projectScope(lease.scope.path);
-      matches(scope, lease.scope, lease.mode === "read"); const receipt = this.remove(state, lease, scope);
-      return { relinquished: true, released: false, handoffId: receipt.id };
+      matches(scope, lease.scope, false); const receipt = this.remove(state, lease, scope);
+      return { relinquished: true, released: false, handoffId: receipt?.id ?? null };
     });
   }
   private async forceReleaseOpen(session: string, path: string, generation: string, reason: string): Promise<{ relinquished: true; released: false }> {

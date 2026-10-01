@@ -428,7 +428,7 @@ export class CoreRuntime {
     options: OpenLeaseOptions = { mode: "write" },
   ): Promise<ToolCallResult> {
     if (this.closing) return failure("project.open", "RUNTIME_CLOSING", "The runtime is closing and cannot open a project.");
-    if (this.processes.hasRunningBackground()) {
+    if (this.processes.hasRunningBackground() && (options.mode !== "read" || this.backgroundOwnership?.session === session)) {
       return failure("project.open", "BACKGROUND_RUNNING", "Stop the background process before switching projects.");
     }
     const queryLabel = basename(query.trim()) || "requested project";
@@ -438,6 +438,7 @@ export class CoreRuntime {
     let project: ActiveProject = { ...resolved.target, mode: options.mode };
     await progress?.report(`Resolved ${basename(project.path)}; checking project setup…`, 0.25);
     let previous = this.activeProjects.get(session);
+    let previousStale = false;
     let previousRelease: JsonValue = null;
     let bindings: JsonValue[] = [];
     let warnings = 0;
@@ -450,19 +451,23 @@ export class CoreRuntime {
           try {
             await this.withOperation(session, previous, false, async () => undefined);
           } catch (error) {
-            if (!(error instanceof LeaseError) || error.code !== "PROJECT_BINDING_REVOKED") throw error;
-            if (this.activeProjects.get(session)?.generation === previous.generation) this.activeProjects.delete(session);
-            previous = undefined;
+            if (previous.mode === "read" && error instanceof LeaseError && error.code === "PROJECT_HEAD_MISMATCH") {
+              previousStale = true;
+            } else {
+              if (!(error instanceof LeaseError) || error.code !== "PROJECT_BINDING_REVOKED") throw error;
+              if (this.activeProjects.get(session)?.generation === previous.generation) this.activeProjects.delete(session);
+              previous = undefined;
+            }
           }
         }
         const constrained = options.leaseMs !== undefined || options.expectedHead !== undefined || options.handoffId !== undefined;
-        if (previous?.path === project.path && previous.mode === options.mode && previous.generation !== undefined && !constrained) {
+        if (previous?.path === project.path && previous.mode === options.mode && previous.generation !== undefined && !constrained && !previousStale) {
           return success("project.open", {
             path: previous.path, kind: previous.kind, mode: previous.mode, generation: previous.generation,
             hooksRun: 0, bindings: [], bindingWarnings: 0, previousRelease: null,
           }, `active=${previous.path} kind=${previous.kind} mode=${previous.mode}`);
         }
-        if (previous?.path === project.path && previous.generation !== undefined) {
+        if (previous?.path === project.path && previous.generation !== undefined && !(previous.mode === "read" && project.mode === "write")) {
           const reserved = await this.leases.reserve(session, project.path, options, previous.generation);
           candidateGeneration = reserved.generation;
           const committed = await this.leases.commit(session, reserved.generation, previous.generation, options.handoffId);
@@ -482,15 +487,14 @@ export class CoreRuntime {
         const committed = await this.leases.commit(session, reserved.generation, undefined, options.handoffId);
         candidateCommitted = true;
         project = { ...project, path: committed.lease.scope.path, generation: committed.lease.generation };
-        const hooks = await matchingHooks(project.path, this.projectOpenHooks);
+        const hooks = project.mode === "read" ? [] : await matchingHooks(project.path, this.projectOpenHooks);
         hooksRun = hooks.length;
-        if (hooks.length > 0 && project.mode === "read") throw new LeaseError("PROJECT_READ_ONLY", { path: project.path });
         if (hooks.length === 0) await progress?.report("No project hooks configured; activating project…", 0.45);
         const setup = await this.withOperation(session, project, hooks.length > 0, async () => {
           const hookFailure = await runProjectHooks(project, hooks, this.processes, progress);
           if (hookFailure !== undefined) return { hookFailure, bindings: [] as JsonValue[] };
           if (this.projectBindings.length === 0) await progress?.report("No downstream project bindings; activating project…", 0.75);
-          return { bindings: await this.serializeDownstream(async () => await projectBindingResults(project.path, this.projectBindings, this.invokeBinding, progress)) };
+          return { bindings: project.mode === "read" ? [] : await this.serializeDownstream(async () => await projectBindingResults(project.path, this.projectBindings, this.invokeBinding, progress)) };
         }, true);
         if (setup.hookFailure !== undefined) {
           await this.leases.release(session, committed.lease.generation);
@@ -510,13 +514,13 @@ export class CoreRuntime {
           }
         }
       } else {
-        const hooks = await matchingHooks(project.path, this.projectOpenHooks);
+        const hooks = project.mode === "read" ? [] : await matchingHooks(project.path, this.projectOpenHooks);
         hooksRun = hooks.length;
         if (hooks.length === 0) await progress?.report("No project hooks configured; activating project…", 0.45);
         const hookFailure = await runProjectHooks(project, hooks, this.processes, progress);
         if (hookFailure !== undefined) return hookFailure;
         if (this.projectBindings.length === 0) await progress?.report("No downstream project bindings; activating project…", 0.75);
-        bindings = await this.serializeDownstream(async () => await projectBindingResults(project.path, this.projectBindings, this.invokeBinding, progress));
+        bindings = project.mode === "read" ? [] : await this.serializeDownstream(async () => await projectBindingResults(project.path, this.projectBindings, this.invokeBinding, progress));
         warnings = bindings.filter((binding) =>
           typeof binding === "object" && binding !== null && !Array.isArray(binding) && binding.status === "error").length;
       }
