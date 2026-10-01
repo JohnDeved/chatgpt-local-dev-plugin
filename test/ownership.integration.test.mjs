@@ -180,6 +180,29 @@ test("background work pins its generation and retained snapshot to one session",
   assert.equal((await a.call("worker", "project.release", { generation: lease.data.generation })).ok, true);
 });
 
+test("foreground completion cannot stop background work", { timeout: 30000 }, async t => {
+  const f = await environment(t), a = await f.client("multiplex");
+  await a.ready("owner"); await a.ready("peer");
+  const lease = await a.call("owner", "project.open", { query: f.source, mode: "write" });
+  assert.equal(lease.ok, true);
+  assert.equal((await a.call("peer", "project.open", { query: f.evidence, mode: "write" })).ok, true);
+  const started = await a.call("owner", "dev.run", {
+    argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+    background: true,
+  });
+  assert.equal(started.ok, true);
+  for (const [session, code] of [["owner", 0], ["peer", 7]]) {
+    const foreground = await a.call(session, "dev.run", { argv: [process.execPath, "-e", `process.exit(${code})`] });
+    assert.equal(foreground.ok, code === 0);
+    if (code !== 0) assert.equal(foreground.error.code, "COMMAND_EXIT_NONZERO");
+    const background = await a.call("owner", "dev.poll");
+    assert.equal(background.data.pid, started.data.pid);
+    assert.equal(background.data.state, "running");
+    assert.equal((await a.call("owner", "project.release", { generation: lease.data.generation })).error.code, "PROJECT_HAS_ACTIVE_WORK");
+  }
+  assert.equal((await a.call("owner", "dev.stop")).data.state, "exited");
+});
+
 test("concurrent replacement claims cannot stop the winning background process", { timeout: 30000 }, async t => {
   const f = await environment(t), a = await f.client("multiplex");
   await a.ready("one"); await a.ready("two");

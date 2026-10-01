@@ -193,9 +193,15 @@ test("stopping a foreground operation terminates its owned process group", { tim
   await auto(ui);
   const manager = new ProcessManager();
   t.after(() => manager.close());
-  const argv = [process.execPath, "-e", "process.stdout.write('ready');setInterval(()=>{},1000)"];
+  const argv = [process.execPath, "-e", "process.on('SIGTERM',()=>process.exit(0));process.stdout.write('ready');setInterval(()=>{},1000)"];
   const execution = hub.execute(mutable, { argv }, async () => await manager.run(argv, home, false, 10_000));
-  const rejected = assert.rejects(execution, /OPERATION_CANCELLED/u);
+  const rejected = assert.rejects(execution, (error) => {
+    assert.equal(error.message, "OPERATION_CANCELLED");
+    assert.equal(error.snapshot.state, "exited");
+    assert.equal(error.snapshot.exitCode, 0);
+    assert.equal(typeof error.snapshot.finishedAt, "string");
+    return true;
+  });
   await ui.wait((message) => message.kind === "event" && message.event.type === "process.output");
   const operation = ui.state.operations.find((item) => item.state === "running");
   assert.ok(operation);

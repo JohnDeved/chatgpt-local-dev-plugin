@@ -145,6 +145,7 @@ export class ProcessManager {
       const result = await Promise.race([tracked.exited.then(() => "exit" as const), timeout, cancelled]);
       if (result !== "exit" || signal?.aborted) {
         const confirmed = await this.terminate(tracked.child);
+        if (confirmed && tracked.finishedAt === null) tracked.finishedAt = new Date().toISOString();
         const code = !confirmed ? "COMMAND_STOP_UNCONFIRMED" : result === "timeout" ? "COMMAND_TIMEOUT" : "OPERATION_CANCELLED";
         throw Object.assign(new Error(code), { snapshot: snapshot(tracked) });
       }

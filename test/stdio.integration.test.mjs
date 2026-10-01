@@ -307,9 +307,12 @@ test("opens a configured project and runs argv without a shell", async () => {
     assert.equal(allowedNonzero.result.structuredContent.data.exitCode, 3);
     const timedOut = await client.request("tools/call", {
       name: "dev.run",
-      arguments: { argv: [process.execPath, "-e", "process.stdout.write('before-timeout');setInterval(()=>{},1000)"], timeoutMs: 1000 },
+      arguments: { argv: [process.execPath, "-e", "process.on('SIGTERM',()=>process.exit(0));process.stdout.write('before-timeout');setInterval(()=>{},1000)"], timeoutMs: 1000 },
     });
     assert.equal(timedOut.result.structuredContent.error.code, "COMMAND_TIMEOUT");
+    assert.equal(timedOut.result.structuredContent.data.state, "exited");
+    assert.equal(timedOut.result.structuredContent.data.exitCode, 0);
+    assert.equal(typeof timedOut.result.structuredContent.data.finishedAt, "string");
     assert.match(timedOut.result.structuredContent.data.outputTail, /before-timeout/u);
     const shell = await client.request("tools/call", {
       name: "dev.run",

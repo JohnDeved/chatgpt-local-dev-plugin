@@ -853,7 +853,7 @@ export class CoreRuntime {
       return failure("dev.run", "COMMAND_FAILED", "Command could not be started.");
     } finally {
       const ownership = backgroundToken === undefined ? undefined : this.backgroundOwnership;
-      const ownsBackground = ownership?.token === backgroundToken;
+      const ownsBackground = backgroundToken !== undefined && ownership?.token === backgroundToken;
       const abandoned = ownsBackground && !backgroundRetained
         ? await this.processes.stop().catch(() => this.processes.poll())
         : undefined;
